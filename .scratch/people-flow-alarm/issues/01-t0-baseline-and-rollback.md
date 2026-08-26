@@ -4,8 +4,10 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] 记录当前视频采集、编码、点播、GB28181 注册和 INVITE/BYE 基线。
-- [ ] 验证分析关闭时现有视频行为保持不变。
-- [ ] 记录基线固件、配置、工具链和测试命令，作为后续回归对照。
+- [x] 记录当前视频采集、编码、点播、GB28181 注册和 INVITE/BYE 基线。
+- [x] 验证分析关闭时现有视频行为保持不变。
+- [x] 记录基线固件、配置、工具链和测试命令，作为后续回归对照。
+
+结果记录：`docs/people-flow-alarm/baseline.md`。

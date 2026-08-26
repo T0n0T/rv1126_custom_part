@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送任务分解
 
-状态：已确认任务粒度，等待按依赖顺序实施
+状态：T0 已完成；T1/T2 已解除阻塞，等待进入实施
 上游规格：`docs/people-flow-alarm/spec.md`
 上游计划：`docs/people-flow-alarm/plan.md`
 本文件作用：记录经确认的 T0-T12 纵向任务、阻塞关系和验收边界
@@ -11,9 +11,9 @@
 
 | 编号 | 任务 | Blocked by | Status |
 | --- | --- | --- | --- |
-| T0 | 基线与回滚开关 | 无 | ready-for-agent |
-| T1 | 真板 RockIVA 探针 | T0 | blocked |
-| T2 | 观察结果与配置契约 | T0 | blocked |
+| T0 | 基线与回滚开关 | 无 | completed |
+| T1 | 真板 RockIVA 探针 | T0 | ready-for-agent |
+| T2 | 观察结果与配置契约 | T0 | ready-for-agent |
 | T3 | 常驻分析分支 | T1、T2 | blocked |
 | T4 | 事件引擎 | T2 | blocked |
 | T5 | 证据缓存与持久事件桥 | T3、T4 | blocked |
@@ -50,11 +50,13 @@ T10 + T11 -> T12
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] 记录当前视频采集、编码、点播、GB28181 注册和 INVITE/BYE 基线。
-- [ ] 验证分析关闭时现有视频行为保持不变。
-- [ ] 记录基线固件、配置、工具链和测试命令，作为后续回归对照。
+- [x] 记录当前视频采集、编码、点播、GB28181 注册和 INVITE/BYE 基线。
+- [x] 验证分析关闭时现有视频行为保持不变。
+- [x] 记录基线固件、配置、工具链和测试命令，作为后续回归对照。
+
+详见 `docs/people-flow-alarm/baseline.md`。真板、交叉编译和 WVP 运行态项目明确保留给后续门禁。
 
 ### T1 — 真板 RockIVA 探针
 
@@ -62,7 +64,7 @@ T10 + T11 -> T12
 
 **Blocked by:** T0 — 基线与回滚开关。
 
-**Status:** blocked
+**Status:** ready-for-agent
 
 - [ ] 在候选分辨率和采样率下取得稳定 person 检出及 `objId/state` 生命周期。
 - [ ] 固化经过测量的模型、结果模式、核心掩码、帧格式和输入方式。
@@ -75,7 +77,7 @@ T10 + T11 -> T12
 
 **Blocked by:** T0 — 基线与回滚开关。
 
-**Status:** blocked
+**Status:** ready-for-agent
 
 - [ ] 定义通道、流纪元、帧 ID、PTS、采集时间、时钟状态、尺寸、后端版本和人体轨迹字段。
 - [ ] 定义分析开关、规则几何、确认/去抖/宽限/冷却、证据和日志限制的校验规则。
