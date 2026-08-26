@@ -1,0 +1,38 @@
+{
+  "sip": {
+    "device_id": "35020000001320000001",
+    "local_ip": "192.168.1.88",
+    "server_addr": "192.168.1.88:8160",
+    "platform_id": "35020000002000000001",
+    "platform_domain": "3502000000",
+    "password": "wvp_sip_password",
+    "expires": 3600,
+    "keepalive_interval": 60,
+    "register_refresh": 300
+  },
+  "media": {
+    "mode": "none",
+    "socket": "/var/run/gb28181_media.sock",
+    "timeout_ms": 3000,
+    "simulate": false
+  },
+  "stream": {
+    "codec": "h264",
+    "payload_type": 98,
+    "width": 3840,
+    "height": 2160,
+    "fps": 30,
+    "bitrate": 8192
+  },
+  "channels": [
+    {
+      "id": "35020000001310000001",
+      "name": "IPC Channel 01",
+      "ptz_type": 0,
+      "status": "ON"
+    }
+  ],
+  "log": {
+    "level": "info"
+  }
+}

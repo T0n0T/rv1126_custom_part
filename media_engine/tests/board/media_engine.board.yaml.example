@@ -1,0 +1,29 @@
+# Board-side manual test config for the RV1126B demo unit
+# (imx415, /dev/video24, DSI-1 connector 97 / plane 75).
+# Copy to the board (e.g. /tmp/me/media_engine.yaml) and run:
+#   ./media_engine --config media_engine.yaml
+
+cam_id: 0
+iq_dir: /oem/usr/share/iqfiles
+
+device: /dev/video24
+format: NV12
+width: 3840
+height: 2160
+fps: 30
+
+connector_id: 97
+plane_id: 75
+preview: on
+# Board screen preview rotation via RGA: 0/90/180/270 (clockwise).
+# Only affects the local preview branch.
+preview_rotation: 0
+# DSI screen is 480x800; RGA scales+rotates to this size for kmssink.
+preview_width: 480
+preview_height: 800
+# Pushed stream rotation via RGA: 0/90/180/270 (clockwise).
+stream_rotation: 0
+af_mode: off
+
+socket: /tmp/me.sock
+snapshot_dir: /tmp/me/snapshots

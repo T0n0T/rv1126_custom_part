@@ -1,0 +1,31 @@
+# media_engine configuration (default path: /oem/usr/share/media_engine.yaml)
+# YAML subset: flat "key: value" scalar map; '#' comments; strings may be
+# quoted with ' or ". All values can be overridden on the command line.
+
+cam_id: 0
+iq_dir: /oem/usr/share/iqfiles
+
+device: /dev/video24
+format: NV12
+width: 3840
+height: 2160
+fps: 30
+
+connector_id: 97
+plane_id: 75
+preview: on
+# Board screen preview rotation via RGA: 0/90/180/270 (clockwise).
+# Only affects the local preview branch.
+preview_rotation: 0
+# KMS preview output size: RGA scales+rotates to the screen resolution so
+# the VOP plane stays within its input limits (RV1126B caps at 1920x1920).
+preview_width: 480
+preview_height: 800
+# Pushed stream rotation via RGA: 0/90/180/270 (clockwise).
+# Only affects the GB28181 live branch; image handling stays in C,
+# the daemon protocol does not carry rotation.
+stream_rotation: 0
+af_mode: off
+
+socket: /var/run/gb28181_media.sock
+snapshot_dir: /data/media_engine/snapshots

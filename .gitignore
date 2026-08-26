@@ -1,0 +1,16 @@
+# Local codebase-memory index and generated artifacts
+.codebase-memory/
+
+# Media-engine build output and generated indexes
+media_engine/out/
+media_engine/.cache/
+media_engine/compile_commands.json
+media_engine/tests/config_test
+media_engine/tests/rpc_client
+media_engine/tests/session_mgr_test
+
+# Daemon build output
+gb28181_daemon/bin/
+
+# Vendored GStreamer checkout/build assets are maintained outside this baseline
+gstreamer/
