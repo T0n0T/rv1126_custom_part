@@ -85,6 +85,17 @@ int main(void)
 	      "unavailable clock cannot carry capture time");
 
 	observation = valid_observation();
+	observation.rules[0].track_id = 11;
+	observation.rules[1] = observation.rules[0];
+	observation.rules[1].track_id = 12;
+	observation.rule_count = 2;
+	CHECK(me_observation_validate(&observation, err, sizeof(err)) == 0,
+	      "same rule id may describe distinct responsible tracks");
+	observation.rules[1].track_id = 11;
+	CHECK(me_observation_validate(&observation, err, sizeof(err)) != 0,
+	      "duplicate rule fact for one track is rejected");
+
+	observation = valid_observation();
 	me_observation_order_init(&order);
 	CHECK(me_observation_order_classify(&order, &observation) ==
 	          ME_OBSERVATION_ORDER_FIRST,

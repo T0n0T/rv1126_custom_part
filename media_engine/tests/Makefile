@@ -24,10 +24,15 @@ config_test: config_test.c ../src/config/config.c ../src/analytics/config.c \
 observation_test: observation_test.c ../src/analytics/observation.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-run: session_mgr_test config_test observation_test
+event_engine_test: event_engine_test.c ../src/analytics/event_engine.c \
+		../src/analytics/config.c ../src/analytics/observation.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+run: session_mgr_test config_test observation_test event_engine_test
 	./session_mgr_test
 	./config_test
 	./observation_test
+	./event_engine_test
 
 clean:
-	rm -f session_mgr_test config_test observation_test
+	rm -f session_mgr_test config_test observation_test event_engine_test

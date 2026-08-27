@@ -168,9 +168,12 @@ int me_observation_validate(const MeNormalizedObservation *observation,
 			return -1;
 		}
 		for (j = 0; j < i; j++) {
-			if (!strcmp(observation->rules[j].rule_id, rule->rule_id)) {
+			if (!strcmp(observation->rules[j].rule_id, rule->rule_id) &&
+			    (rule->track_id == 0 ||
+			     observation->rules[j].track_id == 0 ||
+			     observation->rules[j].track_id == rule->track_id)) {
 				observation_set_err(err, errsz,
-						    "duplicate rule_id %s", rule->rule_id);
+						    "duplicate rule fact %s", rule->rule_id);
 				return -1;
 			}
 		}

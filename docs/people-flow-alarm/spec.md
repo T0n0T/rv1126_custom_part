@@ -117,7 +117,8 @@ WVP 当前对标准 Alarm 的处理是先解析告警元数据，再异步从媒
 - 分析帧宽度和高度；
 - 后端名称以及后端配置/模型版本；
 - 零个或多个人体观察结果，分别包含 `track_id`、`bbox`、`class`、`score` 和归一化 `state`；
-- 可选的原始规则事实，包括 `rule_id`、`rule_type`、`direction` 和后端置信度。
+- 可选的原始规则事实，包括 `rule_id`、`rule_type`、`direction`、后端置信度和
+  可选的责任 `track_id`；`track_id` 缺失表示规则级事实，而不是伪造目标身份。
 
 缺失值必须明确保持缺失，不得根据 SIP `SN`、接收顺序或墙上时间伪造。重复帧和乱序帧在该边界识别，且不得使事件引擎状态倒退。
 
@@ -126,7 +127,7 @@ WVP 当前对标准 Alarm 的处理是先解析告警元数据，再异步从媒
 - `person_count` 表示引用观察时刻，配置 ROI 内当前已确认的人体轨迹数。
 - `delta_in` 和 `delta_out` 表示由已确认轨迹或归一化 BA 事实产生的方向性越线增量。
 - 如果暴露累计值，其作用域必须是通道和明确声明的计数纪元，且不得称为唯一人数。
-- 每个事件包含模式版本、`event_id`、`channel_id`、`stream_epoch`、`event_type`、`rule_id`、`phase`、`event_seq`、`reason`、`event_time`、`source_pts`、`frame_id`、`person_count`、`delta_in`、`delta_out` 和可选 `evidence_id`。
+- 每个事件包含模式版本、`event_id`、`channel_id`、`stream_epoch`、`event_type`、`rule_id`、`phase`、`event_seq`、`reason`、`event_time`、`source_pts`、`frame_id`、`person_count`、`delta_in`、`delta_out`、可选的责任 `track_id` 列表和可选 `evidence_id`。
 - `START` 在确认后只产生一次。`UPDATE` 只针对配置为有意义的变化产生并受限频控制，默认不投递到 GB28181。`END` 在配置的恢复/宽限条件满足后产生，是否投递到 GB28181 由平台配置决定。
 - 正常流重置时，在纪元推进前以重置原因为活动事件收尾。异常进程重启后，在接受新纪元事件前，以重启原因为恢复到的活动状态收尾。
 - 生命周期键在本地重试期间保持稳定，重传不得生成新的 `event_id`。

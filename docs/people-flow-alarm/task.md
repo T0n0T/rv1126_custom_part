@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送任务分解
 
-状态：T0/T2 已完成；T1 等待真板探针；T4 可进入主机确定性实施
+状态：T0/T2/T4 已完成；T1 等待真板探针；T3 仍阻塞于 T1
 上游规格：`docs/people-flow-alarm/spec.md`
 上游计划：`docs/people-flow-alarm/plan.md`
 本文件作用：记录经确认的 T0-T12 纵向任务、阻塞关系和验收边界
@@ -15,7 +15,7 @@
 | T1 | 真板 RockIVA 探针 | T0 | ready-for-agent |
 | T2 | 观察结果与配置契约 | T0 | completed |
 | T3 | 常驻分析分支 | T1、T2 | blocked |
-| T4 | 事件引擎 | T2 | ready-for-agent |
+| T4 | 事件引擎 | T2 | completed |
 | T5 | 证据缓存与持久事件桥 | T3、T4 | blocked |
 | T6 | daemon Outbox 与标准 Alarm | T5 | blocked |
 | T7 | 精确证据 Sink | T5、T6 | blocked |
@@ -108,12 +108,19 @@ T10 + T11 -> T12
 
 **Blocked by:** T2 — 观察结果与配置契约。
 
-**Status:** blocked
+**Status:** completed
 
-- [ ] 对确认、误检、遮挡、边界抖动、冷却和规则重配置产生确定性结果。
-- [ ] 生成稳定的 `event_id`、`START/UPDATE/END`、原因、计数、方向增量、帧 ID 和 PTS。
-- [ ] 流重置、分析关闭、进程重启和乱序/重复帧不会使状态倒退。
-- [ ] 不把跟踪 ID 包装成跨摄像机或全局唯一访客数。
+- [x] 对确认、误检、遮挡、边界抖动、冷却和规则重配置产生确定性结果。
+- [x] 生成稳定的 `event_id`、`START/UPDATE/END`、原因、计数、方向增量、帧 ID 和 PTS。
+- [x] 流重置、分析关闭、进程重启和乱序/重复帧不会使状态倒退。
+- [x] 不把跟踪 ID 包装成跨摄像机或全局唯一访客数。
+
+实现证据：`media_engine/src/analytics/event_engine.{h,c}` 和
+`media_engine/tests/event_engine_test.c`。引擎只消费 T2 归一化观察结果；本地事件
+始终产生完整生命周期，`send_updates/send_end` 留给下游 Alarm sink 决定。
+测试覆盖占用 ROI、越线方向、确认、去抖、消失宽限、冷却、重复/乱序帧、流纪元切换、
+进程重启收尾和配置重置，并验证越线责任轨迹和 ROI 边界迟滞。观察结果契约版本
+从 1 递增到 2 以承载可选责任 `track_id`。尚未接入 RockIVA、证据缓存或 daemon 投递。
 
 ### T5 — 证据缓存与持久事件桥
 

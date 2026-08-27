@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define ME_ANALYTICS_CONTRACT_VERSION 1U
+#define ME_ANALYTICS_CONTRACT_VERSION 2U
 #define ME_ANALYTICS_COORD_SCALE 10000U
 #define ME_ANALYTICS_CHANNEL_ID_MAX 64U
 #define ME_ANALYTICS_BACKEND_NAME_MAX 32U
@@ -75,6 +75,9 @@ typedef struct {
 	MeRuleType rule_type;
 	MeRuleDirection direction;
 	uint32_t score_q;
+	/* Zero denotes a rule-level fact; otherwise this is the responsible
+	 * backend track in the current stream epoch. */
+	uint64_t track_id;
 } MeRuleFact;
 
 /* Backend-neutral result for exactly one source frame. */
