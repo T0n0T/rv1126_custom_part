@@ -17,12 +17,17 @@ LIBYAML_SRCS := ../third_party/libyaml/src/api.c \
 	../third_party/libyaml/src/scanner.c \
 	../third_party/libyaml/src/writer.c
 
-config_test: config_test.c ../src/config/config.c ../src/common/util.c $(LIBYAML_SRCS)
+config_test: config_test.c ../src/config/config.c ../src/analytics/config.c \
+	../src/common/util.c $(LIBYAML_SRCS)
 	$(CC) $(CFLAGS) $(PKG_CFLAGS) -I../third_party/libyaml/include -o $@ $^ $(PKG_LIBS)
 
-run: session_mgr_test config_test
+observation_test: observation_test.c ../src/analytics/observation.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+run: session_mgr_test config_test observation_test
 	./session_mgr_test
 	./config_test
+	./observation_test
 
 clean:
-	rm -f session_mgr_test config_test
+	rm -f session_mgr_test config_test observation_test

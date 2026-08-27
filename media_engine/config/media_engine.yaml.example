@@ -29,3 +29,42 @@ af_mode: off
 
 socket: /var/run/gb28181_media.sock
 snapshot_dir: /data/media_engine/snapshots
+
+# Analytics is intentionally disabled at factory default.  Once T1 has
+# measured a board-supported model/input, set enabled and fill width/height/
+# fps/model.  Dimensions and model are not guessed here.
+analytics_enabled: off
+analytics_backend: rockiva
+# analytics_model: <board-validated-model>
+# analytics_width: <board-validated-even-width>
+# analytics_height: <board-validated-even-height>
+# analytics_fps: <board-validated-fps>
+analytics_score_threshold_q: 0       # confidence in [0,10000]
+analytics_confirm_frames: 3
+analytics_confirm_ms: 300
+analytics_debounce_ms: 300
+analytics_disappear_grace_ms: 1000
+analytics_cooldown_ms: 5000
+analytics_update_interval_ms: 5000
+analytics_send_updates: off
+analytics_send_end: off
+analytics_roi_enabled: off
+# ROI coordinates use [0,10000] normalized units when enabled.
+# analytics_roi_left: 0
+# analytics_roi_top: 0
+# analytics_roi_right: 10000
+# analytics_roi_bottom: 10000
+analytics_line_enabled: off
+# Line endpoints use [0,10000] normalized units when enabled.
+# analytics_line_x1: 0
+# analytics_line_y1: 0
+# analytics_line_x2: 10000
+# analytics_line_y2: 10000
+analytics_rule_id: people-flow
+analytics_rule_type: occupancy
+analytics_evidence_mode: stock_wvp_pull
+analytics_evidence_max_bytes: 536870912
+analytics_evidence_retention_s: 259200
+analytics_evidence_jpeg_quality: 85
+analytics_event_log_max_records: 4096
+analytics_event_log_max_bytes: 67108864

@@ -51,6 +51,14 @@ int main(void)
 	char err[256];
 	int rc;
 
+	CHECK(engine_config_validate(NULL, err, sizeof(err)) != 0,
+	      "null engine config rejected");
+	CHECK(engine_config_load(NULL, NULL, err, sizeof(err)) != 0,
+	      "null config load rejected");
+	CHECK(engine_config_apply_cli(NULL, 1, (char *[]){"media_engine"}, err,
+	                             sizeof(err)) != 0,
+	      "null config CLI rejected");
+
 	/* 1. Full valid YAML. */
 	rc = load_content(
 	    "# comment line\n"
@@ -77,6 +85,84 @@ int main(void)
 	CHECK(strcmp(cfg.socket_path, "/tmp/me.sock") == 0, "socket parsed");
 	CHECK(strcmp(cfg.snapshot_dir, "/data/snaps") == 0,
 	      "snapshot_dir parsed");
+
+	/* 1a. Analytics is disabled by default and accepts a complete contract. */
+	engine_config_defaults(&cfg);
+	CHECK(cfg.analytics.enabled == false && cfg.analytics.width == 0 &&
+	          cfg.analytics.height == 0 && cfg.analytics.fps == 0 &&
+	          cfg.analytics.model[0] == '\0',
+	      "analytics defaults stay disabled and unresolved");
+	rc = load_content(
+	    "analytics_enabled: on\n"
+	    "analytics_backend: rockiva\n"
+	    "analytics_model: pfp-v1\n"
+	    "analytics_width: 640\n"
+	    "analytics_height: 360\n"
+	    "analytics_fps: 10\n"
+	    "analytics_score_threshold_q: 5500\n"
+	    "analytics_roi_enabled: yes\n"
+	    "analytics_roi_left: 100\n"
+	    "analytics_roi_top: 200\n"
+	    "analytics_roi_right: 9800\n"
+	    "analytics_roi_bottom: 9900\n"
+	    "analytics_line_enabled: true\n"
+	    "analytics_line_x1: 100\n"
+	    "analytics_line_y1: 5000\n"
+	    "analytics_line_x2: 9900\n"
+	    "analytics_line_y2: 5000\n"
+	    "analytics_rule_id: entrance\n"
+	    "analytics_rule_type: line_cross\n"
+	    "analytics_evidence_mode: exact_evidence\n"
+	    "analytics_evidence_max_bytes: 536870912\n"
+	    "analytics_evidence_retention_s: 259200\n"
+	    "analytics_evidence_jpeg_quality: 85\n"
+	    "analytics_event_log_max_records: 4096\n"
+	    "analytics_event_log_max_bytes: 67108864\n",
+	    &cfg, err, sizeof(err));
+	CHECK(rc == 0, "complete analytics config loads");
+	CHECK(cfg.analytics.enabled && cfg.analytics.width == 640 &&
+	          cfg.analytics.height == 360 && cfg.analytics.fps == 10 &&
+	          cfg.analytics.score_threshold_q == 5500,
+	      "analytics scalar values parsed");
+	CHECK(cfg.analytics.roi_enabled && cfg.analytics.roi.left == 100 &&
+	          cfg.analytics.roi.bottom == 9900 && cfg.analytics.line_enabled &&
+	          cfg.analytics.line_x2 == 9900,
+	      "analytics geometry parsed");
+	CHECK(cfg.analytics.rule_type == ME_RULE_TYPE_LINE_CROSS &&
+	          strcmp(cfg.analytics.evidence_mode, "exact_evidence") == 0,
+	      "analytics enum and evidence mode parsed");
+
+	rc = load_content("analytics_enabled: true\nanalytics_model: pfp\n",
+	                   &cfg, err, sizeof(err));
+	CHECK(rc != 0, "enabled analytics without board dimensions rejected");
+	rc = load_content(
+	    "analytics_enabled: true\n"
+	    "analytics_model: pfp\n"
+	    "analytics_width: 640\n"
+	    "analytics_height: 360\n"
+	    "analytics_fps: 10\n"
+	    "analytics_roi_enabled: true\n"
+	    "analytics_roi_left: 9000\n"
+	    "analytics_roi_right: 1000\n",
+	    &cfg, err, sizeof(err));
+	CHECK(rc != 0, "inverted analytics ROI rejected");
+	rc = load_content("analytics_evidence_max_bytes: -1\n", &cfg, err,
+	                   sizeof(err));
+	CHECK(rc != 0, "negative analytics byte limit rejected");
+
+	/* CLI uses the same validation boundary and cannot enable an unresolved setup. */
+	{
+		char *argv[] = {"media_engine",       "--analytics-enabled", "on",
+		                "--analytics-model",  "pfp-cli",
+		                "--analytics-width",  "704",
+		                "--analytics-height", "576",
+		                "--analytics-fps",    "10", NULL};
+		engine_config_defaults(&cfg);
+		rc = engine_config_apply_cli(&cfg, 11, argv, err, sizeof(err));
+		CHECK(rc == 0 && cfg.analytics.enabled && cfg.analytics.width == 704 &&
+		              cfg.analytics.height == 576 && cfg.analytics.fps == 10,
+		      "analytics CLI overrides validate");
+	}
 
 	/* 1b. Blank lines are tolerated. */
 	rc = load_content("width: 640\n\n\nfps: 25\n", &cfg, err, sizeof(err));

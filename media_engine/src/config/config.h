@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "analytics/config.h"
+
 #define ME_CFG_PATH_MAX 256
 #define ME_CFG_SOCKET_MAX 128
 
@@ -38,9 +40,13 @@ typedef struct {
 	char af_mode[16];
 	char socket_path[ME_CFG_SOCKET_MAX];
 	char snapshot_dir[ME_CFG_PATH_MAX];
+	MeAnalyticsConfig analytics;
 } EngineConfig;
 
 void engine_config_defaults(EngineConfig *cfg);
+
+/* Validates cross-field analytics settings after file/CLI overrides. */
+int engine_config_validate(const EngineConfig *cfg, char *err, size_t errsz);
 
 /* Loads a YAML config file via libyaml (static, third_party/libyaml). The
  * schema is a top-level mapping whose known keys have scalar values; unknown

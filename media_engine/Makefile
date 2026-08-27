@@ -44,8 +44,10 @@ RK_APP_LDFLAGS = -L$(RK_APP_MEDIA_LIBS_PATH) \
 				 -lrockit -lrkaiq -lm
 
 SRCS := src/main.c \
-		src/common/util.c \
-		src/config/config.c \
+	src/common/util.c \
+	src/analytics/observation.c \
+	src/analytics/config.c \
+	src/config/config.c \
 		src/engine/engine.c \
 		src/ipc/ipc_server.c \
 		src/session/session_mgr.c \

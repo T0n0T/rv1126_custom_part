@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送任务分解
 
-状态：T0 已完成；T1/T2 已解除阻塞，等待进入实施
+状态：T0/T2 已完成；T1 等待真板探针；T4 可进入主机确定性实施
 上游规格：`docs/people-flow-alarm/spec.md`
 上游计划：`docs/people-flow-alarm/plan.md`
 本文件作用：记录经确认的 T0-T12 纵向任务、阻塞关系和验收边界
@@ -13,9 +13,9 @@
 | --- | --- | --- | --- |
 | T0 | 基线与回滚开关 | 无 | completed |
 | T1 | 真板 RockIVA 探针 | T0 | ready-for-agent |
-| T2 | 观察结果与配置契约 | T0 | ready-for-agent |
+| T2 | 观察结果与配置契约 | T0 | completed |
 | T3 | 常驻分析分支 | T1、T2 | blocked |
-| T4 | 事件引擎 | T2 | blocked |
+| T4 | 事件引擎 | T2 | ready-for-agent |
 | T5 | 证据缓存与持久事件桥 | T3、T4 | blocked |
 | T6 | daemon Outbox 与标准 Alarm | T5 | blocked |
 | T7 | 精确证据 Sink | T5、T6 | blocked |
@@ -77,12 +77,17 @@ T10 + T11 -> T12
 
 **Blocked by:** T0 — 基线与回滚开关。
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] 定义通道、流纪元、帧 ID、PTS、采集时间、时钟状态、尺寸、后端版本和人体轨迹字段。
-- [ ] 定义分析开关、规则几何、确认/去抖/宽限/冷却、证据和日志限制的校验规则。
-- [ ] 为缺失时间、重复帧、乱序帧和配置版本变化定义可观察行为。
-- [ ] 提供录制观察结果和确定性时钟夹具，能被主机测试复用。
+- [x] 定义通道、流纪元、帧 ID、PTS、采集时间、时钟状态、尺寸、后端版本和人体轨迹字段。
+- [x] 定义分析开关、规则几何、确认/去抖/宽限/冷却、证据和日志限制的校验规则。
+- [x] 为缺失时间、重复帧、乱序帧和配置版本变化定义可观察行为。
+- [x] 提供固定时间的合成观察结果夹具，能被不依赖 NPU/墙钟的主机测试复用。
+
+实现证据：`media_engine/src/analytics/observation.{h,c}`、
+`media_engine/src/analytics/config.{h,c}`、`media_engine/tests/observation_test.c` 和
+`media_engine/tests/config_test.c`。配置默认关闭分析，启用时要求待真板确认的模型、
+偶数尺寸和采样率；本阶段没有固化 RockIVA 模型、核心掩码或输入内存参数。
 
 ### T3 — 常驻分析分支
 

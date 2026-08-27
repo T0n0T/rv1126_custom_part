@@ -8,12 +8,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <yaml.h>
 
 #define ME_CFG_DEFAULT_FILE "/oem/usr/share/media_engine.yaml"
 
 static bool parse_bool_value(const char *s, bool *out)
 {
+	if (!s || !out)
+		return false;
 	if (!strcmp(s, "1") || !strcasecmp(s, "on") || !strcasecmp(s, "true") ||
 	    !strcasecmp(s, "yes")) {
 		*out = true;
@@ -47,10 +50,57 @@ static int parse_int_value(const char *s, int *out, const char *key, char *err,
 	return 0;
 }
 
+static int parse_u32_value(const char *s, uint32_t *out, const char *key,
+                           char *err, size_t errsz)
+{
+	char *end = NULL;
+	unsigned long long v;
+
+	if (!s || !*s || s[0] == '-' || s[0] == '+') {
+		me_set_err(err, errsz, "config %s: empty value", key);
+		return -1;
+	}
+	errno = 0;
+	v = strtoull(s, &end, 10);
+	if (errno || !end || *end != '\0' || v > UINT32_MAX) {
+		me_set_err(err, errsz, "config %s: invalid unsigned integer \"%s\"",
+		           key, s);
+		return -1;
+	}
+	*out = (uint32_t)v;
+	return 0;
+}
+
+static int parse_u64_value(const char *s, uint64_t *out, const char *key,
+                           char *err, size_t errsz)
+{
+	char *end = NULL;
+	unsigned long long v;
+
+	if (!s || !*s || s[0] == '-' || s[0] == '+') {
+		me_set_err(err, errsz, "config %s: empty value", key);
+		return -1;
+	}
+	errno = 0;
+	v = strtoull(s, &end, 10);
+	if (errno || !end || *end != '\0') {
+		me_set_err(err, errsz, "config %s: invalid unsigned integer \"%s\"",
+		           key, s);
+		return -1;
+	}
+	*out = (uint64_t)v;
+	return 0;
+}
+
 static int set_string(char *dst, size_t cap, const char *value,
                       const char *key, const char *path, int line, char *err,
                       size_t errsz)
 {
+	if (!dst || cap == 0 || !value) {
+		me_set_err(err, errsz, "%s:%d: invalid destination for \"%s\"",
+		           path ? path : "<config>", line, key ? key : "value");
+		return -1;
+	}
 	size_t len = strlen(value);
 
 	if (len >= cap) {
@@ -64,6 +114,8 @@ static int set_string(char *dst, size_t cap, const char *value,
 
 void engine_config_defaults(EngineConfig *cfg)
 {
+	if (!cfg)
+		return;
 	memset(cfg, 0, sizeof(*cfg));
 	cfg->cam_id = 0;
 	snprintf(cfg->iq_dir, sizeof(cfg->iq_dir), "%s", ME_CFG_DEFAULT_IQ_DIR);
@@ -84,6 +136,16 @@ void engine_config_defaults(EngineConfig *cfg)
 	         ME_CFG_DEFAULT_SOCKET);
 	snprintf(cfg->snapshot_dir, sizeof(cfg->snapshot_dir), "%s",
 	         ME_CFG_DEFAULT_SNAPSHOT_DIR);
+	me_analytics_config_defaults(&cfg->analytics);
+}
+
+int engine_config_validate(const EngineConfig *cfg, char *err, size_t errsz)
+{
+	if (!cfg) {
+		me_set_err(err, errsz, "engine config is null");
+		return -1;
+	}
+	return me_analytics_config_validate(&cfg->analytics, err, errsz);
 }
 
 static bool is_known_key(const char *key)
@@ -93,7 +155,20 @@ static bool is_known_key(const char *key)
 	    "width",        "height",     "fps",      "connector_id",
 	    "plane_id",     "preview",    "preview_rotation", "stream_rotation",
 	    "preview_width", "preview_height", "af_mode", "socket",
-	    "socket_path",  "snapshot_dir",
+	    "socket_path",  "snapshot_dir", "analytics_enabled",
+	    "analytics_backend", "analytics_model", "analytics_width",
+	    "analytics_height", "analytics_fps", "analytics_score_threshold_q",
+	    "analytics_confirm_frames", "analytics_confirm_ms",
+	    "analytics_debounce_ms", "analytics_disappear_grace_ms",
+	    "analytics_cooldown_ms", "analytics_update_interval_ms",
+	    "analytics_send_updates", "analytics_send_end", "analytics_roi_enabled",
+	    "analytics_roi_left", "analytics_roi_top", "analytics_roi_right",
+	    "analytics_roi_bottom", "analytics_line_enabled", "analytics_line_x1",
+	    "analytics_line_y1", "analytics_line_x2", "analytics_line_y2",
+	    "analytics_rule_id", "analytics_rule_type", "analytics_evidence_mode",
+	    "analytics_evidence_max_bytes", "analytics_evidence_retention_s",
+	    "analytics_evidence_jpeg_quality", "analytics_event_log_max_records",
+	    "analytics_event_log_max_bytes",
 	};
 	size_t i;
 
@@ -107,9 +182,14 @@ static bool is_known_key(const char *key)
 static int config_apply_document(EngineConfig *cfg, yaml_document_t *doc,
                                  const char *path, char *err, size_t errsz)
 {
-	yaml_node_t *root = yaml_document_get_root_node(doc);
+	yaml_node_t *root;
 	yaml_node_pair_t *pair;
 
+	if (!cfg || !doc || !path) {
+		me_set_err(err, errsz, "invalid config document arguments");
+		return -1;
+	}
+	root = yaml_document_get_root_node(doc);
 	if (!root)
 		return 0; /* empty document */
 	if (root->type != YAML_MAPPING_NODE) {
@@ -267,6 +347,175 @@ static int config_apply_document(EngineConfig *cfg, yaml_document_t *doc,
 			               value, key, path,
 			               (int)knode->start_mark.line + 1, err, errsz) != 0)
 				return -1;
+		} else if (!strcmp(key, "analytics_enabled")) {
+			if (!parse_bool_value(value, &b)) {
+				me_set_err(err, errsz,
+				           "%s:%d: analytics_enabled must be on/off", path,
+				           (int)knode->start_mark.line + 1);
+				return -1;
+			}
+			cfg->analytics.enabled = b;
+		} else if (!strcmp(key, "analytics_backend")) {
+			if (set_string(cfg->analytics.backend,
+			               sizeof(cfg->analytics.backend), value, key, path,
+			               (int)knode->start_mark.line + 1, err, errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_model")) {
+			if (set_string(cfg->analytics.model, sizeof(cfg->analytics.model),
+			               value, key, path,
+			               (int)knode->start_mark.line + 1, err, errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_width")) {
+			if (parse_int_value(value, &cfg->analytics.width, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_height")) {
+			if (parse_int_value(value, &cfg->analytics.height, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_fps")) {
+			if (parse_int_value(value, &cfg->analytics.fps, key, err, errsz) !=
+			    0)
+				return -1;
+		} else if (!strcmp(key, "analytics_score_threshold_q")) {
+			if (parse_u32_value(value, &cfg->analytics.score_threshold_q, key,
+			                    err, errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_confirm_frames")) {
+			if (parse_u32_value(value, &cfg->analytics.confirm_frames, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_confirm_ms")) {
+			if (parse_u32_value(value, &cfg->analytics.confirm_ms, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_debounce_ms")) {
+			if (parse_u32_value(value, &cfg->analytics.debounce_ms, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_disappear_grace_ms")) {
+			if (parse_u32_value(value, &cfg->analytics.disappear_grace_ms, key,
+			                    err, errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_cooldown_ms")) {
+			if (parse_u32_value(value, &cfg->analytics.cooldown_ms, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_update_interval_ms")) {
+			if (parse_u32_value(value, &cfg->analytics.update_interval_ms, key,
+			                    err, errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_send_updates")) {
+			if (!parse_bool_value(value, &b)) {
+				me_set_err(err, errsz,
+				           "%s:%d: analytics_send_updates must be on/off", path,
+				           (int)knode->start_mark.line + 1);
+				return -1;
+			}
+			cfg->analytics.send_updates = b;
+		} else if (!strcmp(key, "analytics_send_end")) {
+			if (!parse_bool_value(value, &b)) {
+				me_set_err(err, errsz,
+				           "%s:%d: analytics_send_end must be on/off", path,
+				           (int)knode->start_mark.line + 1);
+				return -1;
+			}
+			cfg->analytics.send_end = b;
+		} else if (!strcmp(key, "analytics_roi_enabled")) {
+			if (!parse_bool_value(value, &b)) {
+				me_set_err(err, errsz,
+				           "%s:%d: analytics_roi_enabled must be on/off", path,
+				           (int)knode->start_mark.line + 1);
+				return -1;
+			}
+			cfg->analytics.roi_enabled = b;
+		} else if (!strcmp(key, "analytics_roi_left")) {
+			if (parse_u32_value(value, &cfg->analytics.roi.left, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_roi_top")) {
+			if (parse_u32_value(value, &cfg->analytics.roi.top, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_roi_right")) {
+			if (parse_u32_value(value, &cfg->analytics.roi.right, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_roi_bottom")) {
+			if (parse_u32_value(value, &cfg->analytics.roi.bottom, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_line_enabled")) {
+			if (!parse_bool_value(value, &b)) {
+				me_set_err(err, errsz,
+				           "%s:%d: analytics_line_enabled must be on/off", path,
+				           (int)knode->start_mark.line + 1);
+				return -1;
+			}
+			cfg->analytics.line_enabled = b;
+		} else if (!strcmp(key, "analytics_line_x1")) {
+			if (parse_u32_value(value, &cfg->analytics.line_x1, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_line_y1")) {
+			if (parse_u32_value(value, &cfg->analytics.line_y1, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_line_x2")) {
+			if (parse_u32_value(value, &cfg->analytics.line_x2, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_line_y2")) {
+			if (parse_u32_value(value, &cfg->analytics.line_y2, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_rule_id")) {
+			if (set_string(cfg->analytics.rule_id,
+			               sizeof(cfg->analytics.rule_id), value, key, path,
+			               (int)knode->start_mark.line + 1, err, errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_rule_type")) {
+			if (!me_analytics_rule_type_parse(value,
+			                                  &cfg->analytics.rule_type)) {
+				me_set_err(err, errsz,
+				           "%s:%d: analytics_rule_type is invalid", path,
+				           (int)knode->start_mark.line + 1);
+				return -1;
+			}
+		} else if (!strcmp(key, "analytics_evidence_mode")) {
+			if (!me_analytics_evidence_mode_valid(value)) {
+				me_set_err(err, errsz,
+				           "%s:%d: analytics_evidence_mode is invalid", path,
+				           (int)knode->start_mark.line + 1);
+				return -1;
+			}
+			if (set_string(cfg->analytics.evidence_mode,
+			               sizeof(cfg->analytics.evidence_mode), value, key,
+			               path, (int)knode->start_mark.line + 1, err,
+			               errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_evidence_max_bytes")) {
+			if (parse_u64_value(value, &cfg->analytics.evidence_max_bytes, key,
+			                    err, errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_evidence_retention_s")) {
+			if (parse_u32_value(value, &cfg->analytics.evidence_retention_s, key,
+			                    err, errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_evidence_jpeg_quality")) {
+			if (parse_u32_value(value,
+			                    &cfg->analytics.evidence_jpeg_quality, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_event_log_max_records")) {
+			if (parse_u32_value(value,
+			                    &cfg->analytics.event_log_max_records, key, err,
+			                    errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "analytics_event_log_max_bytes")) {
+			if (parse_u64_value(value, &cfg->analytics.event_log_max_bytes, key,
+			                    err, errsz) != 0)
+				return -1;
 		} else {
 			me_log(ME_LOG_WARN, "config %s:%d: unknown key \"%s\" ignored",
 			       path, (int)knode->start_mark.line + 1, key);
@@ -284,6 +533,10 @@ int engine_config_load(EngineConfig *cfg, const char *path, char *err,
 	int rc = -1;
 	int loaded;
 
+	if (!cfg) {
+		me_set_err(err, errsz, "engine config is null");
+		return -1;
+	}
 	if (!path)
 		path = ME_CFG_DEFAULT_FILE;
 	f = fopen(path, "r");
@@ -311,6 +564,8 @@ int engine_config_load(EngineConfig *cfg, const char *path, char *err,
 		goto out;
 	}
 	rc = config_apply_document(cfg, &doc, path, err, errsz);
+	if (rc == 0)
+		rc = engine_config_validate(cfg, err, errsz);
 	yaml_document_delete(&doc);
 out:
 	yaml_parser_delete(&parser);
@@ -339,11 +594,17 @@ static void print_usage(const char *prog)
 	        "  --preview-rotation <deg> preview rotation 0/90/180/270, default 0\n"
 	        "  --preview-width <px>  preview output width, default %d\n"
 	        "  --preview-height <px> preview output height, default %d\n"
-	        "  --stream-rotation <deg> stream rotation 0/90/180/270, default 0\n"
-	        "  --af <mode>      focus mode: off, auto, semi-auto, manual; default off\n"
-	        "  -s <path>        unix socket path, default %s\n"
-	        "  --snapshot-dir <dir> snapshot output directory, default %s\n"
-	        "  -h               show this help\n",
+		"  --stream-rotation <deg> stream rotation 0/90/180/270, default 0\n"
+		"  --af <mode>      focus mode: off, auto, semi-auto, manual; default off\n"
+		"  -s <path>        unix socket path, default %s\n"
+		"  --snapshot-dir <dir> snapshot output directory, default %s\n"
+		"  --analytics-enabled <on|off> enable analytics (default off)\n"
+		"  --analytics-backend <name> analytics backend (default rockiva)\n"
+		"  --analytics-model <name> analytics model (required when enabled)\n"
+		"  --analytics-width <px> analysis width (board-validated)\n"
+		"  --analytics-height <px> analysis height (board-validated)\n"
+		"  --analytics-fps <fps> analysis sampling rate (board-validated)\n"
+		"  -h               show this help\n",
 	        prog, ME_CFG_DEFAULT_IQ_DIR, ME_CFG_DEFAULT_DEVICE,
 	        ME_CFG_DEFAULT_FORMAT, ME_CFG_DEFAULT_WIDTH, ME_CFG_DEFAULT_HEIGHT,
 	        ME_CFG_DEFAULT_FPS, ME_CFG_DEFAULT_CONNECTOR, ME_CFG_DEFAULT_PLANE,
@@ -360,6 +621,12 @@ static const struct option long_options[] = {
 	{"stream-rotation", required_argument, NULL, 1005},
 	{"preview-width", required_argument, NULL, 1006},
 	{"preview-height", required_argument, NULL, 1007},
+	{"analytics-enabled", required_argument, NULL, 1008},
+	{"analytics-backend", required_argument, NULL, 1009},
+	{"analytics-model", required_argument, NULL, 1010},
+	{"analytics-width", required_argument, NULL, 1011},
+	{"analytics-height", required_argument, NULL, 1012},
+	{"analytics-fps", required_argument, NULL, 1013},
 	{"help", no_argument, NULL, 'h'},
 	{0, 0, 0, 0},
 };
@@ -371,6 +638,10 @@ int engine_config_apply_cli(EngineConfig *cfg, int argc, char **argv,
 	int opt;
 	int i;
 
+	if (!cfg || argc < 1 || !argv) {
+		me_set_err(err, errsz, "invalid command line arguments");
+		return -1;
+	}
 	/* Locate --config before the getopt pass so the file is loaded before
 	 * CLI overrides are applied. */
 	for (i = 1; i < argc; i++) {
@@ -524,6 +795,42 @@ int engine_config_apply_cli(EngineConfig *cfg, int argc, char **argv,
 			}
 			cfg->preview_height = (int)v;
 			break;
+		case 1008:
+			if (!parse_bool_value(optarg, &b)) {
+				me_set_err(err, errsz,
+				           "invalid --analytics-enabled value: %s", optarg);
+				return -1;
+			}
+			cfg->analytics.enabled = b;
+			break;
+		case 1009:
+			if (set_string(cfg->analytics.backend,
+			               sizeof(cfg->analytics.backend), optarg,
+			               "analytics_backend", "<command line>", 0, err,
+			               errsz) != 0)
+				return -1;
+			break;
+		case 1010:
+			if (set_string(cfg->analytics.model, sizeof(cfg->analytics.model),
+			               optarg, "analytics_model", "<command line>", 0,
+			               err, errsz) != 0)
+				return -1;
+			break;
+		case 1011:
+			if (parse_int_value(optarg, &cfg->analytics.width,
+			                    "analytics_width", err, errsz) != 0)
+				return -1;
+			break;
+		case 1012:
+			if (parse_int_value(optarg, &cfg->analytics.height,
+			                    "analytics_height", err, errsz) != 0)
+				return -1;
+			break;
+		case 1013:
+			if (parse_int_value(optarg, &cfg->analytics.fps,
+			                    "analytics_fps", err, errsz) != 0)
+				return -1;
+			break;
 		case 'h':
 			print_usage(argv[0]);
 			return 1;
@@ -533,5 +840,5 @@ int engine_config_apply_cli(EngineConfig *cfg, int argc, char **argv,
 			return -1;
 		}
 	}
-	return 0;
+	return engine_config_validate(cfg, err, errsz);
 }

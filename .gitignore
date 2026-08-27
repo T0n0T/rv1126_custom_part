@@ -6,6 +6,7 @@ media_engine/out/
 media_engine/.cache/
 media_engine/compile_commands.json
 media_engine/tests/config_test
+media_engine/tests/observation_test
 media_engine/tests/rpc_client
 media_engine/tests/session_mgr_test
 
