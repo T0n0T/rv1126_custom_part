@@ -10,6 +10,8 @@ media_engine/tests/observation_test
 media_engine/tests/event_engine_test
 media_engine/tests/rpc_client
 media_engine/tests/session_mgr_test
+media_engine/tests/board/rockiva_probe/rockiva_probe
+media_engine/tests/board/rockiva_probe/rockiva_probe_stub
 
 # Daemon build output
 gb28181_daemon/bin/

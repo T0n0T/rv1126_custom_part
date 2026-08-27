@@ -160,6 +160,10 @@ make -C tests
 `tests/board/` 下为板端测试工具（rpc_client、live 测试脚本、解析/链接探针、
 gdb 脚本），均不进产品代码。已验证：
 
+`tests/board/rockiva_probe/` 是 T1 专用的 RockIVA 探针：它独立交叉编译，
+读取紧凑 NV12 文件并打印 DET 目标、释放回调和时延；CPU 地址路径通过主机
+语法检查和 AArch64 链接验证，DMA-BUF/相机输入仍需真板运行后才能纳入验收。
+
 - AIQ（imx415）+ v4l2 dmabuf 采集 + kmssink 预览 + MPP 硬编全链路正常
 - `start_live` 后 RTP 包到达 `192.168.1.88:20000`：v=2、pt=98、
   SSRC=123456789（十进制）、约 1800 包/5s（30fps）

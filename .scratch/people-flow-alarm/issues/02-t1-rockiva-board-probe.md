@@ -4,7 +4,11 @@
 
 **Blocked by:** 01 — 基线与回滚开关。
 
-**Status:** blocked
+**Status:** blocked（板卡当前不可达）
+
+2026-08-27 已完成主机侧探针、交叉编译和连接门禁检查，但目标
+`192.168.1.63` 无 ARP/路由，SSH/ADB 均不可达。未产生板端检测结果；恢复板卡
+连接后按 `docs/people-flow-alarm/t1-board-blocker.md` 的命令继续。
 
 - [ ] 在候选分辨率和采样率下取得稳定 person 检出及 `objId/state` 生命周期。
 - [ ] 固化经过测量的模型、结果模式、核心掩码、帧格式和输入方式。

@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送——实施计划
 
-状态：实施中（T2 已完成；T1 真板门禁未完成）
+状态：实施中（T1 探针已提供，但真板当前不可达；T2 已完成）
 上游规格：`docs/people-flow-alarm/spec.md`
 下游产物：`task.md`、`checklist.md`（另行创建）
 本阶段约束：仅在已解除依赖的 T2/T4 主机确定性边界内修改代码；T1 真板结果仍是
@@ -74,10 +74,21 @@ GB28181 格式化均由业务层负责。
 产出：
 
 - `tests/board/rockiva_probe`（非产品代码）：NV12 测试图/相机帧 → RockIVA
-  init → push → release callback → DET/BA 回调打印；
+  init → push → release callback → DET 回调打印；BA 规则验证在检测输入和
+  生命周期确认后单独进行，避免把规则触发结果误当成全量目标结果；
 - 板端运行脚本与基准记录（帧率、时延、内存、NPU 占用）；
 - 决策记录：模型选择、分析分辨率/帧率、`detectResultMode`、BA 规则或纯 DET；
 - 确认 DMA-BUF FD 生命周期与 `ROCKIVA_FrameReleaseCallback` 的时序。
+
+当前已提供 `media_engine/tests/board/rockiva_probe/`：它通过 SDK 交叉工具链
+构建 AArch64 探针，使用紧凑 CPU 地址 NV12 文件验证 DET 回调、对象
+`objId/state/score/rect/frameId`、释放回调和逐帧时延。该工具仍不是产品目标；
+DMA-BUF FD/物理地址输入以及相机分支只能在真板上继续验证，尚未形成参数固化结论。
+
+2026-08-27 的板端门禁检查中，主机到预设板卡 `192.168.1.63` 无 ARP/路由，
+SSH 与 ADB 均失败；因此当前只有 SDK 静态准备和 AArch64 交叉编译证据，
+没有 person、`objId/state`、release callback 或资源数据。详见
+`docs/people-flow-alarm/t1-board-blocker.md`。板卡恢复前不推进 B2/B3 生产分析分支。
 
 验收门禁：
 

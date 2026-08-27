@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送任务分解
 
-状态：T0/T2/T4 已完成；T1 等待真板探针；T3 仍阻塞于 T1
+状态：T0/T2/T4 已完成；T1 被真板不可达阻塞；T3 仍阻塞于 T1
 上游规格：`docs/people-flow-alarm/spec.md`
 上游计划：`docs/people-flow-alarm/plan.md`
 本文件作用：记录经确认的 T0-T12 纵向任务、阻塞关系和验收边界
@@ -12,7 +12,7 @@
 | 编号 | 任务 | Blocked by | Status |
 | --- | --- | --- | --- |
 | T0 | 基线与回滚开关 | 无 | completed |
-| T1 | 真板 RockIVA 探针 | T0 | ready-for-agent |
+| T1 | 真板 RockIVA 探针 | T0、真板连接 | blocked |
 | T2 | 观察结果与配置契约 | T0 | completed |
 | T3 | 常驻分析分支 | T1、T2 | blocked |
 | T4 | 事件引擎 | T2 | completed |
@@ -64,7 +64,17 @@ T10 + T11 -> T12
 
 **Blocked by:** T0 — 基线与回滚开关。
 
-**Status:** ready-for-agent
+**Status:** blocked（探针已实现，等待真板连接）
+
+探针已落地为非产品路径：`media_engine/tests/board/rockiva_probe/`。它提供
+SDK 交叉编译 Makefile、运行脚本、CPU 地址 NV12 输入、DET 回调、帧释放回调、
+对象字段和逐帧时延统计；仍需复制到真实 RV1126B，完成相机/DMA-BUF 专项试验，
+因此本任务尚未完成。
+
+2026-08-27 的执行门禁检查确认当前主机到 `192.168.1.63` 无 ARP/路由；
+`ping`、SSH 和 ADB 均不可达，未产生任何板端检测结果。可复现记录见
+`docs/people-flow-alarm/t1-board-blocker.md`。在板卡恢复连接前，不得将 T1
+标记为完成或解除 T3。
 
 - [ ] 在候选分辨率和采样率下取得稳定 person 检出及 `objId/state` 生命周期。
 - [ ] 固化经过测量的模型、结果模式、核心掩码、帧格式和输入方式。
