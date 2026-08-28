@@ -7,8 +7,11 @@
 **Status:** blocked（板卡当前不可达）
 
 2026-08-27 已完成主机侧探针、交叉编译和连接门禁检查，但目标
-`192.168.1.63` 无 ARP/路由，SSH/ADB 均不可达。未产生板端检测结果；恢复板卡
-连接后按 `docs/people-flow-alarm/t1-board-blocker.md` 的命令继续。
+`192.168.1.63` 在两个主机接口上的邻居解析均失败，SSH 超时且 ADB 无设备。
+未产生板端检测结果；恢复板卡连接后按
+`docs/people-flow-alarm/t1-board-blocker.md` 的命令继续。探针默认会在
+没有 person 或没有 `TRACKING` 状态时返回失败，避免仅凭 SDK 调用成功误过门禁；
+同一 `objId` 生命周期和 ID switch 质量仍由真板代表性场景验收。
 
 - [ ] 在候选分辨率和采样率下取得稳定 person 检出及 `objId/state` 生命周期。
 - [ ] 固化经过测量的模型、结果模式、核心掩码、帧格式和输入方式。

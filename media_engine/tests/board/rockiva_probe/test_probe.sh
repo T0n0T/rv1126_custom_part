@@ -38,10 +38,19 @@ expect_failure()
 NORMAL_LOG=$TMP_DIR/normal.log
 ROCKIVA_STUB_SCENARIO=normal run_probe "$NORMAL_INPUT" >"$NORMAL_LOG" 2>&1
 grep -F "summary pushed=2 push_failures=0" "$NORMAL_LOG" >/dev/null
+grep -F "person=2 person_states[first=1 tracking=1" "$NORMAL_LOG" >/dev/null
 grep -F "released_frames=2" "$NORMAL_LOG" >/dev/null
 echo "[PASS] normal callbacks and releases return success"
 
+DIAGNOSTIC_LOG=$TMP_DIR/empty-scene-diagnostic.log
+ROCKIVA_STUB_SCENARIO=no_person "$PROBE" --model-path "$TMP_DIR" \
+	--input "$NORMAL_INPUT" --width 2 --height 2 --frames 2 --fps 1000000 \
+	--timeout-ms 10 --min-person 0 --min-tracking 0 >"$DIAGNOSTIC_LOG" 2>&1
+grep -F "person=0 person_states[first=0 tracking=0" "$DIAGNOSTIC_LOG" >/dev/null
+echo "[PASS] zero thresholds explicitly permit empty-scene diagnostics"
+
 expect_failure init-failure "$NORMAL_INPUT" init_fail "ROCKIVA_Init failed"
+expect_failure version-failure "$NORMAL_INPUT" version_fail "ROCKIVA_GetVersion failed"
 expect_failure release-callback-failure "$NORMAL_INPUT" release_callback_fail \
 	"ROCKIVA_SetFrameReleaseCallback failed"
 expect_failure detect-init-failure "$NORMAL_INPUT" detect_init_fail \
@@ -49,6 +58,10 @@ expect_failure detect-init-failure "$NORMAL_INPUT" detect_init_fail \
 expect_failure empty-input "$EMPTY_INPUT" normal "input ended before frame 1"
 expect_failure short-input "$SHORT_INPUT" normal "input ended before frame 2"
 expect_failure push-failure "$NORMAL_INPUT" push_fail "push_failures=2"
+expect_failure no-person "$NORMAL_INPUT" no_person \
+	"person observations below minimum: 0 < 1"
+expect_failure no-tracking "$NORMAL_INPUT" no_tracking \
+	"person tracking observations below minimum: 0 < 1"
 expect_failure wait-failure "$NORMAL_INPUT" wait_fail \
 	"frame ownership cleanup deferred after incomplete SDK shutdown"
 expect_failure detect-release-failure "$NORMAL_INPUT" detect_release_fail \

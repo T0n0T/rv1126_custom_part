@@ -39,7 +39,7 @@ GB28181 格式化均由业务层负责。
 | 参数 | 候选默认 | 固化依据 |
 | --- | --- | --- |
 | 分析分辨率/帧率 | 640x360@10，或 704x576@10（与模型输入对齐） | 板端 NPU 负载、目标场景最小可检测尺寸 |
-| RockIVA 模型 | `ROCKIVA_DET_MODEL_PFP` 或 `CLS7`，仅取 person 类 | 板端可用模型文件、检测精度与帧率 |
+| RockIVA 模型 | `ROCKIVA_DET_MODEL_PFP` 或 `CLS8`，仅取 person 类 | 板端可用模型文件、检测精度与帧率 |
 | 推理核心 | `coreMask = 0x04` | SDK 样例与板端实测 |
 | 结果模式 | BA `detectResultMode = 1`，或纯 DET 全量回调 | 占用人数需要全量目标，不能只收规则触发目标 |
 | 分析帧格式 | NV12，`ROCKIVA_IMAGE_FORMAT_YUV420SP_NV12` | 主链原始格式，避免额外转换 |
@@ -85,8 +85,9 @@ GB28181 格式化均由业务层负责。
 `objId/state/score/rect/frameId`、释放回调和逐帧时延。该工具仍不是产品目标；
 DMA-BUF FD/物理地址输入以及相机分支只能在真板上继续验证，尚未形成参数固化结论。
 
-2026-08-27 的板端门禁检查中，主机到预设板卡 `192.168.1.63` 无 ARP/路由，
-SSH 与 ADB 均失败；因此当前只有 SDK 静态准备和 AArch64 交叉编译证据，
+2026-08-27 的板端门禁检查中，主机两个 `192.168.1.0/24` 接口到预设板卡
+`192.168.1.63` 的邻居解析均失败，SSH 超时且 ADB 无设备；因此当前只有 SDK
+静态准备和 AArch64 交叉编译证据，
 没有 person、`objId/state`、release callback 或资源数据。详见
 `docs/people-flow-alarm/t1-board-blocker.md`。板卡恢复前不推进 B2/B3 生产分析分支。
 

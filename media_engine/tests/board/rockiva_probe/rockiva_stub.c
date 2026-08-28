@@ -22,6 +22,8 @@ RockIvaRetCode ROCKIVA_GetVersion(const uint32_t max_len, char *version)
 {
 	if (!version || max_len == 0)
 		return ROCKIVA_RET_NULL_PTR;
+	if (scenario_is("version_fail"))
+		return ROCKIVA_RET_FAIL;
 	snprintf(version, max_len, "rockiva-host-stub");
 	return ROCKIVA_RET_SUCCESS;
 }
@@ -94,8 +96,10 @@ RockIvaRetCode ROCKIVA_PushFrame(
 	result.objInfo[0].objId = 101;
 	result.objInfo[0].frameId = input->frameId;
 	result.objInfo[0].score = 90;
-	result.objInfo[0].type = ROCKIVA_OBJECT_TYPE_PERSON;
-	result.objInfo[0].state = input->frameId == 1
+	result.objInfo[0].type = scenario_is("no_person")
+					 ? ROCKIVA_OBJECT_TYPE_VEHICLE
+					 : ROCKIVA_OBJECT_TYPE_PERSON;
+	result.objInfo[0].state = input->frameId == 1 || scenario_is("no_tracking")
 					 ? ROCKIVA_OBJECT_STATE_FIRST
 					 : ROCKIVA_OBJECT_STATE_TRACKING;
 	if (stub->detect_callback)

@@ -30,6 +30,8 @@
 #define DEFAULT_CORE_MASK 0U
 #define DEFAULT_MODEL ROCKIVA_DET_MODEL_PFP
 #define DEFAULT_TIMEOUT_MS 5000
+#define DEFAULT_MIN_PERSON_OBSERVATIONS 1U
+#define DEFAULT_MIN_TRACKING_OBSERVATIONS 1U
 #define MAX_VERSION 128U
 
 struct probe_options {
@@ -43,6 +45,8 @@ struct probe_options {
 	unsigned int core_mask;
 	RockIvaDetModel model;
 	int timeout_ms;
+	unsigned int min_person_observations;
+	unsigned int min_tracking_observations;
 };
 
 enum probe_frame_state {
@@ -68,6 +72,11 @@ struct probe_state {
 	uint64_t detection_errors;
 	uint64_t detection_frame_errors;
 	uint64_t detection_object_overflows;
+	uint64_t person_observations;
+	uint64_t person_first_observations;
+	uint64_t person_tracking_observations;
+	uint64_t person_lost_observations;
+	uint64_t person_disappear_observations;
 	uint64_t release_callbacks;
 	uint64_t release_entries;
 	uint64_t released_frames;
@@ -157,6 +166,10 @@ static void usage(const char *program)
 	printf("  --channel N            RockIVA channel ID (default: %u)\n", DEFAULT_CHANNEL);
 	printf("  --core-mask MASK       SDK core mask (default: 0x%x)\n", DEFAULT_CORE_MASK);
 	printf("  --timeout-ms N         ROCKIVA_WaitFinish timeout (default: %d)\n", DEFAULT_TIMEOUT_MS);
+	printf("  --min-person N         required person observations (default: %u)\n",
+	       DEFAULT_MIN_PERSON_OBSERVATIONS);
+	printf("  --min-tracking N       required person TRACKING observations (default: %u)\n",
+	       DEFAULT_MIN_TRACKING_OBSERVATIONS);
 }
 
 static int parse_options(int argc, char **argv, struct probe_options *options)
@@ -172,6 +185,8 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 		{"channel", required_argument, NULL, 'c'},
 		{"core-mask", required_argument, NULL, 'k'},
 		{"timeout-ms", required_argument, NULL, 't'},
+		{"min-person", required_argument, NULL, 'p'},
+		{"min-tracking", required_argument, NULL, 'r'},
 		{"help", no_argument, NULL, 'H'},
 		{NULL, 0, NULL, 0},
 	};
@@ -186,8 +201,10 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 	options->core_mask = DEFAULT_CORE_MASK;
 	options->model = DEFAULT_MODEL;
 	options->timeout_ms = DEFAULT_TIMEOUT_MS;
+	options->min_person_observations = DEFAULT_MIN_PERSON_OBSERVATIONS;
+	options->min_tracking_observations = DEFAULT_MIN_TRACKING_OBSERVATIONS;
 
-	while ((option = getopt_long(argc, argv, "m:i:M:w:h:n:f:c:k:t:?", long_options,
+	while ((option = getopt_long(argc, argv, "m:i:M:w:h:n:f:c:k:t:p:r:?", long_options,
 				    NULL)) != -1) {
 		switch (option) {
 		case 'm':
@@ -232,6 +249,14 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 			options->timeout_ms = (int)timeout;
 			break;
 		}
+		case 'p':
+			if (parse_uint(optarg, &options->min_person_observations) != 0)
+				return -1;
+			break;
+		case 'r':
+			if (parse_uint(optarg, &options->min_tracking_observations) != 0)
+				return -1;
+			break;
 		case 'H':
 			usage(argv[0]);
 			return 1;
@@ -256,6 +281,30 @@ static void print_object(const RockIvaObjectInfo *object)
 	       object->objId, object->state, object->type, object->score, object->frameId,
 	       object->rect.topLeft.x, object->rect.topLeft.y, object->rect.bottomRight.x,
 	       object->rect.bottomRight.y, object->timestamp);
+}
+
+static void count_person_state(struct probe_state *state,
+			       const RockIvaObjectInfo *object)
+{
+	if (object->type != ROCKIVA_OBJECT_TYPE_PERSON)
+		return;
+	state->person_observations++;
+	switch (object->state) {
+	case ROCKIVA_OBJECT_STATE_FIRST:
+		state->person_first_observations++;
+		break;
+	case ROCKIVA_OBJECT_STATE_TRACKING:
+		state->person_tracking_observations++;
+		break;
+	case ROCKIVA_OBJECT_STATE_LOST:
+		state->person_lost_observations++;
+		break;
+	case ROCKIVA_OBJECT_STATE_DISPEAR:
+		state->person_disappear_observations++;
+		break;
+	default:
+		break;
+	}
 }
 
 static struct probe_frame *find_frame_locked(struct probe_state *state,
@@ -340,8 +389,10 @@ static void detect_callback(const RockIvaDetectResult *result,
 			       &state->detection_latency_max_ns, "detect");
 	if (result->objNum > ROCKIVA_MAX_OBJ_NUM)
 		state->detection_object_overflows++;
-	for (i = 0; i < result->objNum && i < ROCKIVA_MAX_OBJ_NUM; i++)
+	for (i = 0; i < result->objNum && i < ROCKIVA_MAX_OBJ_NUM; i++) {
+		count_person_state(state, &result->objInfo[i]);
 		print_object(&result->objInfo[i]);
+	}
 	pthread_mutex_unlock(&state->metrics_lock);
 }
 
@@ -555,12 +606,18 @@ int main(int argc, char **argv)
 	det_params.detObjectType = ROCKIVA_OBJECT_TYPE_BITMASK(ROCKIVA_OBJECT_TYPE_PERSON);
 
 	printf("probe model=%s model_path=%s input=%s size=%ux%u frames=%u fps=%u "
-	       "channel=%u core_mask=0x%x\n",
+	       "channel=%u core_mask=0x%x min_person=%u min_tracking=%u\n",
 	       model_name(options.model), options.model_path, options.input_path, options.width,
 	       options.height, options.frames, options.fps, options.channel_id,
-	       options.core_mask);
+	       options.core_mask, options.min_person_observations,
+	       options.min_tracking_observations);
 	ret = ROCKIVA_GetVersion(MAX_VERSION, version);
 	printf("rockiva version ret=%d value=%s\n", ret, version[0] ? version : "(unavailable)");
+	if (ret != ROCKIVA_RET_SUCCESS) {
+		fprintf(stderr, "ROCKIVA_GetVersion failed: %d\n", ret);
+		operation_failed = 1;
+		goto done;
+	}
 	ret = ROCKIVA_Init(&handle, ROCKIVA_MODE_VIDEO, &init_params, &state);
 	if (ret != ROCKIVA_RET_SUCCESS) {
 		fprintf(stderr, "ROCKIVA_Init failed: %d\n", ret);
@@ -568,12 +625,6 @@ int main(int argc, char **argv)
 		goto done;
 	}
 	handle_initialized = 1;
-	ret = ROCKIVA_SetFrameReleaseCallback(handle, release_callback);
-	if (ret != ROCKIVA_RET_SUCCESS) {
-		fprintf(stderr, "ROCKIVA_SetFrameReleaseCallback failed: %d\n", ret);
-		operation_failed = 1;
-		goto release_handle;
-	}
 	ret = ROCKIVA_DETECT_Init(handle, &det_params, detect_callback);
 	if (ret != ROCKIVA_RET_SUCCESS) {
 		fprintf(stderr, "ROCKIVA_DETECT_Init failed: %d\n", ret);
@@ -581,6 +632,12 @@ int main(int argc, char **argv)
 		goto release_handle;
 	}
 	detect_initialized = 1;
+	ret = ROCKIVA_SetFrameReleaseCallback(handle, release_callback);
+	if (ret != ROCKIVA_RET_SUCCESS) {
+		fprintf(stderr, "ROCKIVA_SetFrameReleaseCallback failed: %d\n", ret);
+		operation_failed = 1;
+		goto release_detect;
+	}
 
 	for (frame = 0; frame < options.frames; frame++) {
 		RockIvaImage image;
@@ -687,6 +744,17 @@ done:
 	    state.release_mismatches != 0 || state.release_invalid_callbacks != 0 ||
 	    state.channel_mismatches != 0)
 		operation_failed = 1;
+	if (state.person_observations < options.min_person_observations) {
+		fprintf(stderr, "person observations below minimum: %" PRIu64 " < %u\n",
+			state.person_observations, options.min_person_observations);
+		operation_failed = 1;
+	}
+	if (state.person_tracking_observations < options.min_tracking_observations) {
+		fprintf(stderr, "person tracking observations below minimum: %" PRIu64
+			" < %u\n", state.person_tracking_observations,
+			options.min_tracking_observations);
+		operation_failed = 1;
+	}
 	if (handle_initialized && (!final_wait_succeeded || !release_succeeded))
 		operation_failed = 1;
 	if (handle_initialized && release_succeeded &&
@@ -694,6 +762,8 @@ done:
 		fprintf(stderr, "SDK shutdown completed with unreturned frames\n");
 	printf("summary pushed=%" PRIu64 " push_failures=%" PRIu64
 	       " detection_callbacks=%" PRIu64 " detection_errors=%" PRIu64
+	       " person=%" PRIu64 " person_states[first=%" PRIu64
+	       " tracking=%" PRIu64 " lost=%" PRIu64 " disappear=%" PRIu64 "]"
 	       " release_callbacks=%" PRIu64 " release_entries=%" PRIu64
 	       " released_frames=%" PRIu64 " release_unmatched=%" PRIu64
 	       " release_duplicates=%" PRIu64 " release_mismatches=%" PRIu64
@@ -701,6 +771,9 @@ done:
 	       " detect_latency_ms[min=%.3f max=%.3f avg=%.3f]"
 	       " release_latency_ms[min=%.3f max=%.3f avg=%.3f]\n",
 	       state.pushed, state.push_failures, state.detections, state.detection_errors,
+	       state.person_observations, state.person_first_observations,
+	       state.person_tracking_observations, state.person_lost_observations,
+	       state.person_disappear_observations,
 	       state.release_callbacks, state.release_entries, state.released_frames,
 	       state.release_unmatched, state.release_duplicates, state.release_mismatches,
 	       state.release_invalid_callbacks, state.channel_mismatches,

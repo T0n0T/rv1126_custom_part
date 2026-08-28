@@ -11,6 +11,7 @@ the requested number of frames, waits for completion, and prints:
 - each push result and frame ID;
 - detection status, object ID, state, score, type, normalized rectangle and
   callback frame ID;
+- person observations split by `FIRST`, `TRACKING`, `LOST` and `DISPEAR`;
 - frame-release callback channel, count, frame IDs and memory handles;
 - final push/detection/release counts with per-callback latency statistics and
   ownership/channel consistency counters.
@@ -25,6 +26,18 @@ The detector is released only after a successful all-frame wait. Shutdown
 attempts a final wait and always reports the global release result; if that
 wait or release fails, the probe deliberately leaves unresolved buffers and
 callback state alive until process exit instead of risking a use-after-free.
+
+By default a successful run also requires at least one person observation and
+at least one person in `ROCKIVA_OBJECT_STATE_TRACKING`. `MIN_PERSON` and
+`MIN_TRACKING` may raise those thresholds. Setting either threshold to zero is
+accepted only as an explicit empty-scene/lifecycle diagnostic and cannot
+satisfy the T1 person and tracking gate.
+
+This threshold gate proves only that person and tracking observations were
+reported. It does not prove that `FIRST` and `TRACKING` belong to the same
+`objId`, that an ID remains stable through the clip, or that the ID-switch rate
+is acceptable. Record those properties from representative board runs before
+completing T1.
 
 It intentionally uses a CPU virtual address (`dataAddr`) and a tightly packed
 NV12 file first. The capture path's DMA-BUF FD/physical-address lifetime is a
@@ -49,8 +62,9 @@ resulting ELF is AArch64 and must be copied together with `librockiva.so`,
 
 `make test` builds a host-only executable against `rockiva_stub.c`. The stub is
 never linked into the board probe; it drives process-level checks for normal
-detect/release callbacks, initialization and callback-registration failures,
-empty/short input, push failure, wait failure, and SDK cleanup failures. These
+detect/release callbacks, version/initialization/callback-registration failures,
+empty/short input, push failure, missing person/tracking observations, wait
+failure, and SDK cleanup failures. These
 tests validate exit status and CPU-buffer ownership accounting, not RockIVA
 inference quality or board behavior.
 
@@ -58,7 +72,10 @@ inference quality or board behavior.
 
 The input is exactly `width * height * 3 / 2` bytes per frame. For example,
 for a `640x360` probe with 30 frames, the file must be 10,368,000 bytes.
-The file can contain repeated frames when validating lifecycle and ownership.
+Use a representative clip containing a person for the default success gate.
+Repeated or synthetic empty frames are useful only when validating format and
+ownership with the minimum-observation checks deliberately disabled; they are
+not detection or tracking evidence.
 
 ```sh
 ./run_probe.sh

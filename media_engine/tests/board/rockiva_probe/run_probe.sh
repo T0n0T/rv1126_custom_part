@@ -13,6 +13,8 @@ MODEL=${MODEL:-pfp}
 CHANNEL=${CHANNEL:-0}
 CORE_MASK=${CORE_MASK:-0}
 TIMEOUT_MS=${TIMEOUT_MS:-5000}
+MIN_PERSON=${MIN_PERSON:-1}
+MIN_TRACKING=${MIN_TRACKING:-1}
 
 export LD_LIBRARY_PATH="${ROCKIVA_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
@@ -26,4 +28,6 @@ exec "$(dirname "$0")/rockiva_probe" \
 	--fps "$FPS" \
 	--channel "$CHANNEL" \
 	--core-mask "$CORE_MASK" \
-	--timeout-ms "$TIMEOUT_MS"
+	--timeout-ms "$TIMEOUT_MS" \
+	--min-person "$MIN_PERSON" \
+	--min-tracking "$MIN_TRACKING"
