@@ -1216,6 +1216,7 @@ int main(int argc, char **argv)
 	int final_cleanup_safe = 0;
 	int sdk_released = 0;
 	int v4l2_cleanup_safe = 1;
+	int opened_mainpath;
 	int result = 1;
 	pthread_condattr_t cond_attr;
 
@@ -1268,6 +1269,25 @@ int main(int argc, char **argv)
 
 		fprintf(stderr, "open %s failed: errno=%d (%s)\n", options.device,
 			saved_errno, strerror(saved_errno));
+		operation_failed = 1;
+		goto cleanup;
+	}
+	opened_mainpath = rockiva_probe_fd_is_mainpath(fd,
+							ROCKIVA_PROBE_MAINPATH);
+	if (opened_mainpath < 0) {
+		int saved_errno = errno;
+
+		fprintf(stderr, "cannot verify opened V4L2 device identity: errno=%d (%s)\n",
+			saved_errno, strerror(saved_errno));
+		errno = saved_errno;
+		operation_failed = 1;
+		goto cleanup;
+	}
+	if (opened_mainpath && !options.allow_mainpath) {
+		fprintf(stderr,
+			"refusing opened production mainpath %s after identity check; pass "
+			"--allow-mainpath only for an explicitly approved experiment\n",
+			options.device);
 		operation_failed = 1;
 		goto cleanup;
 	}

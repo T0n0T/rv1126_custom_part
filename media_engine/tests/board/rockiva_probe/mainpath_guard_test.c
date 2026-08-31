@@ -32,6 +32,19 @@ static int expect_match(const char *name, const char *device,
 	return 0;
 }
 
+static int expect_fd_match(const char *name, int device_fd,
+				 const char *mainpath, int expected)
+{
+	int actual = rockiva_probe_fd_is_mainpath(device_fd, mainpath);
+
+	if (actual != expected) {
+		fprintf(stderr, "%s: expected %d, got %d\n", name, expected, actual);
+		return -1;
+	}
+	printf("[PASS] %s\n", name);
+	return 0;
+}
+
 int main(void)
 {
 	char directory_template[] = "/tmp/rockiva-mainpath-guard.XXXXXX";
@@ -42,6 +55,7 @@ int main(void)
 	char symlink_alias[PATH_MAX];
 	char other_path[PATH_MAX];
 	int fd = -1;
+	int char_device_fd = -1;
 	int result = 1;
 
 	subdirectory[0] = '\0';
@@ -81,9 +95,23 @@ int main(void)
 	    expect_match("symlink alias", symlink_alias, mainpath, 1) != 0 ||
 	    expect_match("different device path", other_path, mainpath, 0) != 0)
 		goto cleanup;
+	char_device_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+	if (char_device_fd < 0) {
+		fprintf(stderr, "cannot open /dev/null for fd identity test: %s\n",
+			strerror(errno));
+		goto cleanup;
+	}
+	if (expect_fd_match("opened mainpath character device", char_device_fd,
+				   "/dev/null", 1) != 0 ||
+	    expect_fd_match("opened different character device", char_device_fd,
+				   "/dev/zero", 0) != 0 ||
+	    expect_fd_match("invalid opened fd", -1, "/dev/null", -1) != 0)
+		goto cleanup;
 	result = 0;
 
 cleanup:
+	if (char_device_fd >= 0)
+		(void)close(char_device_fd);
 	if (fd >= 0)
 		(void)close(fd);
 	(void)unlink(symlink_alias);

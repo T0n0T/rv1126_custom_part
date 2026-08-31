@@ -166,4 +166,9 @@ for source in v4l2_expbuf_probe.c v4l2_rockiva_probe.c rockiva_dmabuf_probe.c; d
 		'rockiva_probe_is_mainpath(options->device' "$SCRIPT_DIR/$source"
 done
 
+for source in v4l2_expbuf_probe.c v4l2_rockiva_probe.c; do
+	expect_contains "$source-opened-device-identity" \
+		'rockiva_probe_fd_is_mainpath(fd' "$SCRIPT_DIR/$source"
+done
+
 printf '%s\n' '[PASS] runner guard checks complete without opening a V4L2 device'

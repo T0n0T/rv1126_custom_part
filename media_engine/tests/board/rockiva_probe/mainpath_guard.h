@@ -35,4 +35,21 @@ static int rockiva_probe_is_mainpath(const char *device,
 	return result;
 }
 
+/* Re-check the object actually opened, closing the path-check/open race. */
+static int rockiva_probe_fd_is_mainpath(int device_fd, const char *mainpath)
+{
+	struct stat device_stat;
+	struct stat mainpath_stat;
+
+	if (device_fd < 0 || !mainpath || !mainpath[0])
+		return -1;
+	if (fstat(device_fd, &device_stat) != 0)
+		return -1;
+	if (stat(mainpath, &mainpath_stat) != 0)
+		return -1;
+	if (!S_ISCHR(device_stat.st_mode) || !S_ISCHR(mainpath_stat.st_mode))
+		return 0;
+	return device_stat.st_rdev == mainpath_stat.st_rdev ? 1 : 0;
+}
+
 #endif

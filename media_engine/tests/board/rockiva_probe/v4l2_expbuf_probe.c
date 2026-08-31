@@ -439,6 +439,7 @@ int main(int argc, char **argv)
 	int stream_started = 0;
 	int format_restore_required = 0;
 	int v4l2_cleanup_safe = 1;
+	int opened_mainpath;
 	int result = 1;
 	int parse_result;
 
@@ -458,6 +459,23 @@ int main(int argc, char **argv)
 		fprintf(stderr, "open %s failed: errno=%d (%s)\n", options.device,
 			saved_errno, strerror(saved_errno));
 		return 1;
+	}
+	opened_mainpath = rockiva_probe_fd_is_mainpath(fd,
+							ROCKIVA_PROBE_MAINPATH);
+	if (opened_mainpath < 0) {
+		int saved_errno = errno;
+
+		fprintf(stderr, "cannot verify opened V4L2 device identity: errno=%d (%s)\n",
+			saved_errno, strerror(saved_errno));
+		errno = saved_errno;
+		goto cleanup;
+	}
+	if (opened_mainpath && !options.allow_mainpath) {
+		fprintf(stderr,
+			"refusing opened production mainpath %s after identity check; pass "
+			"--allow-mainpath only for an explicitly approved experiment\n",
+			options.device);
+		goto cleanup;
 	}
 	if (query_capabilities(fd) != 0 ||
 	    get_current_format(fd, &original_format) != 0)

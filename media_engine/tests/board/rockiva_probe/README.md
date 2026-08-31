@@ -34,6 +34,14 @@ detection, release, threshold, or other existing error gates.
 If completion cannot be proven, the probe leaves unresolved buffers and
 callback state alive until process exit instead of risking a use-after-free.
 
+The native V4L2 probes perform the mainpath guard twice: once before opening
+the requested path and once after opening it by comparing the opened
+descriptor's character-device identity with `/dev/video24`. If the opened
+identity cannot be verified, the probe fails closed. The GStreamer DMA-BUF
+probe keeps its pre-open path guard because `v4l2src` owns the capture open;
+it remains an independent experiment and must be run only on the unused
+selfpath.
+
 By default a successful run also requires at least one person observation and
 at least one person in `ROCKIVA_OBJECT_STATE_TRACKING`. `MIN_PERSON` and
 `MIN_TRACKING` may raise those thresholds. Setting either threshold to zero is
