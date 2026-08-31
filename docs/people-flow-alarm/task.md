@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送任务分解
 
-状态：T0/T2/T4 已完成；T1 被真板不可达阻塞；T3 仍阻塞于 T1
+状态：T0/T2/T4 已完成；T1 已完成 CPU-NV12 与隔离采集 DMA-BUF 生命周期子门禁但仍在进行；T3 仍阻塞于 T1
 上游规格：`docs/people-flow-alarm/spec.md`
 上游计划：`docs/people-flow-alarm/plan.md`
 本文件作用：记录经确认的 T0-T12 纵向任务、阻塞关系和验收边界
@@ -12,7 +12,7 @@
 | 编号 | 任务 | Blocked by | Status |
 | --- | --- | --- | --- |
 | T0 | 基线与回滚开关 | 无 | completed |
-| T1 | 真板 RockIVA 探针 | T0、真板连接 | blocked |
+| T1 | 真板 RockIVA 探针 | T0 | in progress |
 | T2 | 观察结果与配置契约 | T0 | completed |
 | T3 | 常驻分析分支 | T1、T2 | blocked |
 | T4 | 事件引擎 | T2 | completed |
@@ -64,20 +64,29 @@ T10 + T11 -> T12
 
 **Blocked by:** T0 — 基线与回滚开关。
 
-**Status:** blocked（探针已实现，等待真板连接）
+**Status:** in progress（CPU-NV12 有人片段通过；隔离原生 DMA-BUF 生命周期和短时停止/重启边界通过；当前有人场景、完整流边界和主视频连续性仍待验证）
 
 探针已落地为非产品路径：`media_engine/tests/board/rockiva_probe/`。它提供
 SDK 交叉编译 Makefile、运行脚本、CPU 地址 NV12 输入、DET 回调、帧释放回调、
 对象字段和逐帧时延统计；默认成功门槛还要求出现 person 和 `TRACKING` 状态。
 该门槛不替代同一 `objId` 生命周期、ID switch 和遮挡恢复质量的真板验收。
-仍需复制到真实 RV1126B，完成相机/DMA-BUF 专项试验，因此本任务尚未完成。
+已复制到真实 RV1126B 并完成 CPU-NV12 专项试验，以及 `/dev/video25` 隔离节点的
+原生 V4L2 MMAP/EXPBUF 到 RockIVA 生命周期试验。2026-08-31 连续两次各采集 30 帧，
+序列分别为 `48108..48137`、`48156..48185`，每次均为 `30/30/30/30` capture/push/
+detect/release，`sequence_errors=0`；两次直接退出码均为 `1`，原因是当前画面没有
+person/tracking。该结果只支持短时隔离停止/重启边界，不支持有人场景、完整流 epoch、
+异步停止回调或主视频连续性结论，因此本任务尚未完成。
 
-2026-08-27 的执行门禁检查确认当前主机两个接口到 `192.168.1.63` 的邻居解析
-均失败；`ping` 无响应、SSH 超时且 ADB 无设备，未产生任何板端检测结果。
-可复现记录见 `docs/people-flow-alarm/t1-board-blocker.md`。在板卡恢复连接前，
-不得将 T1 标记为完成或解除 T3。
+2026-08-27 的网络不可达记录保留在 `docs/people-flow-alarm/t1-board-blocker.md`；
+2026-08-28 已通过 ADB 在同一板卡完成 CPU-NV12 PFP/CLS8 探针。结果、库/模型指纹、
+`ROCKIVA_WaitFinish` 不支持的受限 fallback，以及未完成边界见
+`docs/people-flow-alarm/t1-board-result.md`。这些证据不解除 T3：有人场景下的
+DMA-BUF 检出仍未验证；短时隔离停止/重启已有证据，但完整流 epoch、异步回调、
+UAF/泄漏、主路径 sequence 和编码连续性仍未验证。另一次 GStreamer DMA-BUF runner
+在第一个 sample 因内存不是 DMA-BUF 被拒绝，不能与原生 `VIDIOC_EXPBUF` 结果混同。
 
-- [ ] 在候选分辨率和采样率下取得稳定 person 检出及 `objId/state` 生命周期。
+- [ ] 在候选分辨率和采样率下取得稳定 person 检出及 `objId/state` 生命周期；当前两次
+      原生 V4L2 运行均为 `person=0 tracking=0`。
 - [ ] 固化经过测量的模型、结果模式、核心掩码、帧格式和输入方式。
 - [ ] 证明 push、release callback、停止和重启无泄漏、重复释放或悬空引用。
 - [ ] 证明分析分支关闭点播后仍可运行，且启停不影响主视频。

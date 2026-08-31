@@ -19,16 +19,28 @@
 
 - [x] 非产品探针源码、SDK 交叉编译入口和板端运行脚本已提供；主机语法检查与
       AArch64 交叉编译通过（不替代真实板验收）。
-- [x] 2026-08-27 已执行板端连接门禁检查并记录阻塞证据；当前未伪造任何板端
-      检测、跟踪或生命周期结果（详见 `t1-board-blocker.md`）。
+- [x] 2026-08-27 的板端连接阻塞已记录为历史证据；2026-08-28 CPU-NV12
+      检测/跟踪和 2026-08-31 隔离原生 DMA-BUF 生命周期、停止/重启边界结果见
+      `t1-board-result.md`，未用传输层退出码伪造成功结论。
 - [x] 探针 host stub 已覆盖正常回调、版本/初始化/注册失败、短输入、push、wait
       和 SDK 清理失败，另覆盖无 person、无 `TRACKING` 状态；失败路径均要求
       非零退出。
-- [ ] 真实 RV1126B 型号、固件和 RockIVA 库版本已记录。
-- [ ] 候选模型、输入尺寸、帧率、核心掩码和结果模式均有实测数据。
-- [ ] person 检出、`objId/state` 变化和流纪元边界有录制结果。
-- [ ] DMA-BUF/物理地址输入、release callback、停止和重启无泄漏/UAF。
-- [ ] 分析启停不影响主编码和点播。
+- [x] 真实 RV1126B 型号、固件内核和 RockIVA 运行时库/模型指纹已记录。
+- [x] CPU-NV12 真板 PFP/CLS8、`640x360`、10 FPS 与 DET callback 均有数据；PFP
+      测试了 `coreMask=0x0/0x4`，CLS8 测试了 `coreMask=0x0`。原生 V4L2 PFP
+      `640x360`、`coreMask=0x0` 的 DMA-BUF fd 生命周期也有真板数据，未将相机采样率
+      误记为 10 FPS。
+- [ ] person 检出和 `objId/state` 变化已有录制结果；2026-08-31 两次原生 V4L2
+      运行均为 `person=0 tracking=0`，真实采集流纪元边界仍未验证。
+- [ ] 有人场景下的 DMA-BUF/物理地址输入已验收；隔离 `/dev/video25` 的单物理平面
+      `'NV12'` DMA-BUF、release callback、停止、短时重启和格式恢复已有证据，但
+      GStreamer runner 第一个 sample 不是 DMA-BUF，完整链路、异步停止和 UAF 仍未验证。
+- [ ] 分析启停不影响主编码和点播；目前只有 `/dev/video24` PID/RSS/FD 只读快照，
+      没有主路径 sequence 或编码连续性证据。
+
+CPU-NV12 探针、隔离 V4L2 DMA-BUF 生命周期与停止/重启结果、运行时指纹和限制见
+`t1-board-result.md`。PFP 暂定为下一阶段候选，不代表精度、ID switch 或生产参数
+已经验收。
 
 ## T2 观察结果与配置契约
 

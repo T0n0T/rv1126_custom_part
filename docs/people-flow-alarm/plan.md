@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送——实施计划
 
-状态：实施中（T1 探针已提供，但真板当前不可达；T2 已完成）
+状态：实施中（T1 探针已提供，板端已恢复可达但有人场景门禁未满足；T2 已完成）
 上游规格：`docs/people-flow-alarm/spec.md`
 下游产物：`task.md`、`checklist.md`（另行创建）
 本阶段约束：仅在已解除依赖的 T2/T4 主机确定性边界内修改代码；T1 真板结果仍是
@@ -83,13 +83,13 @@ GB28181 格式化均由业务层负责。
 当前已提供 `media_engine/tests/board/rockiva_probe/`：它通过 SDK 交叉工具链
 构建 AArch64 探针，使用紧凑 CPU 地址 NV12 文件验证 DET 回调、对象
 `objId/state/score/rect/frameId`、释放回调和逐帧时延。该工具仍不是产品目标；
-DMA-BUF FD/物理地址输入以及相机分支只能在真板上继续验证，尚未形成参数固化结论。
+2026-08-31 已在隔离 `/dev/video25` 上补充原生 V4L2 MMAP/EXPBUF 到 RockIVA 的
+DMA-BUF 生命周期验证；生产 GStreamer 分支、物理地址输入、有人场景和参数固化
+仍待真板证据。
 
-2026-08-27 的板端门禁检查中，主机两个 `192.168.1.0/24` 接口到预设板卡
-`192.168.1.63` 的邻居解析均失败，SSH 超时且 ADB 无设备；因此当前只有 SDK
-静态准备和 AArch64 交叉编译证据，
-没有 person、`objId/state`、release callback 或资源数据。详见
-`docs/people-flow-alarm/t1-board-blocker.md`。板卡恢复前不推进 B2/B3 生产分析分支。
+2026-08-27 的连接阻塞记录保留在 `docs/people-flow-alarm/t1-board-blocker.md`；
+板卡恢复后已取得 CPU-NV12 检测数据和隔离 DMA-BUF 生命周期数据，但隔离画面无
+人员，且生产主路径后置状态尚未复核。T1 完成前不推进 B2/B3 生产分析分支。
 
 验收门禁：
 

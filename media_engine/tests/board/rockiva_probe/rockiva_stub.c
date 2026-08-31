@@ -102,13 +102,17 @@ RockIvaRetCode ROCKIVA_PushFrame(
 	result.objInfo[0].state = input->frameId == 1 || scenario_is("no_tracking")
 					 ? ROCKIVA_OBJECT_STATE_FIRST
 					 : ROCKIVA_OBJECT_STATE_TRACKING;
-	if (stub->detect_callback)
+	if (stub->detect_callback) {
 		stub->detect_callback(&result, ROCKIVA_SUCCESS, stub->userdata);
+		if (scenario_is("detection_duplicate"))
+			stub->detect_callback(&result, ROCKIVA_SUCCESS, stub->userdata);
+	}
 	memset(&released, 0, sizeof(released));
 	released.channelId = input->channelId;
 	released.count = 1;
 	released.frames[0] = *input;
-	if (stub->release_callback)
+	if (stub->release_callback && !scenario_is("missing_release") &&
+	    !scenario_is("wait_unsupported_missing_release"))
 		stub->release_callback(&released, stub->userdata);
 	return ROCKIVA_RET_SUCCESS;
 }
@@ -119,7 +123,12 @@ RockIvaRetCode ROCKIVA_WaitFinish(RockIvaHandle handle, long frame_id,
 	(void)handle;
 	(void)frame_id;
 	(void)timeout_ms;
-	return scenario_is("wait_fail") ? ROCKIVA_RET_FAIL : ROCKIVA_RET_SUCCESS;
+	if (scenario_is("wait_fail"))
+		return ROCKIVA_RET_FAIL;
+	if (scenario_is("wait_unsupported") ||
+	    scenario_is("wait_unsupported_missing_release"))
+		return ROCKIVA_RET_UNSUPPORTED;
+	return ROCKIVA_RET_SUCCESS;
 }
 
 RockIvaRetCode ROCKIVA_DETECT_Release(RockIvaHandle handle)

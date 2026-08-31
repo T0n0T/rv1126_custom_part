@@ -22,9 +22,16 @@ used by both callbacks. Each CPU frame is registered as pending before
 release callback frees only the matching pointer recorded by this probe. A
 push failure frees the buffer only when the callback has not already returned
 it. This also makes a synchronous callback during `ROCKIVA_PushFrame` safe.
-The detector is released only after a successful all-frame wait. Shutdown
-attempts a final wait and always reports the global release result; if that
-wait or release fails, the probe deliberately leaves unresolved buffers and
+`ROCKIVA_WaitFinish` has three outcomes. A successful return is the normal
+completion proof. `ROCKIVA_RET_UNSUPPORTED` is an explicit capability fallback:
+the probe uses a bounded condition-variable wait and continues only after every
+accepted frame has both a completed detection callback and a matching release
+callback. Only then are `ROCKIVA_DETECT_Release` and `ROCKIVA_Release` called.
+Any other nonzero wait result, a callback timeout, or inconsistent callback
+accounting remains a failure. The fallback is not a waiver for push,
+detection, release, threshold, or other existing error gates.
+
+If completion cannot be proven, the probe leaves unresolved buffers and
 callback state alive until process exit instead of risking a use-after-free.
 
 By default a successful run also requires at least one person observation and
@@ -63,10 +70,19 @@ resulting ELF is AArch64 and must be copied together with `librockiva.so`,
 `make test` builds a host-only executable against `rockiva_stub.c`. The stub is
 never linked into the board probe; it drives process-level checks for normal
 detect/release callbacks, version/initialization/callback-registration failures,
-empty/short input, push failure, missing person/tracking observations, wait
+empty/short input, push failure, missing person/tracking observations, the
+unsupported-wait fallback with complete and missing release callbacks, wait
 failure, and SDK cleanup failures. These
 tests validate exit status and CPU-buffer ownership accounting, not RockIVA
 inference quality or board behavior.
+
+`make test` also runs `test_runner_guards.sh`. It copies the three capture
+runner scripts and a fake probe into a temporary directory, so the checks never
+open a V4L2 node. The checks cover required environment variables, invalid
+`ALLOW_MAINPATH` values, safe default argument forwarding, explicit
+`--allow-mainpath` forwarding, and the `LD_LIBRARY_PATH`/`GST_PLUGIN_PATH`
+environment setup. This is a host-side runner contract test only; it does not
+prove the target device or RockIVA runtime is available.
 
 ## Input and run
 
@@ -87,8 +103,153 @@ Set `ROCKIVA_LIB_DIR` when the runtime libraries are staged outside
 `/oem/usr/lib`; it is prepended to `LD_LIBRARY_PATH` by the runner.
 
 The exit status is successful only when initialization and input completed,
-all requested pushes succeeded, all waits and SDK cleanup succeeded, and every
-pushed frame was returned through the release callback. A successful process
-is not T1 evidence by itself: record the complete output, board/firmware/library
+all requested pushes succeeded, every pushed frame was returned through the
+release callback, and either all waits/SDK cleanup succeeded or an SDK
+explicitly reported `ROCKIVA_RET_UNSUPPORTED` and the bounded callback
+completion fallback proved the same CPU input lifecycle before cleanup. A
+fallback success relies only on all callbacks observed by this probe and a
+successful SDK release; it does not establish DMA-BUF ownership or lifetime.
+DMA-BUF validation remains an independent board gate. A successful process is
+not T1 evidence by itself: record the complete output, board/firmware/library
 versions, NPU/CPU/memory metrics, and the capture-side DMA-BUF experiment in
 the checklist.
+
+## Kernel V4L2 EXPBUF capability probe
+
+`v4l2_expbuf_probe` is a separate test-only AArch64 executable for checking
+the kernel exporter without involving GStreamer or RockIVA. It opens the
+explicit capture node, requests `V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE` with
+progressive NV12, accepts the driver's equivalent `NV12` or `NV12M` result,
+allocates `V4L2_MEMORY_MMAP` buffers, runs `VIDIOC_QUERYBUF`, and runs
+`VIDIOC_EXPBUF` for every returned physical plane. Each exported fd is
+validated with `fcntl(F_GETFD)` and `fstat()`, then closed immediately. It
+does not queue buffers, start streaming, read frames, run inference, or claim
+T1 readiness.
+
+The device, width, height and requested MMAP buffer count are required. The
+probe rejects `/dev/video24` by default; `ALLOW_MAINPATH=1` is required for an
+explicitly approved mainpath experiment. Start with an unused selfpath node:
+
+```sh
+make v4l2_expbuf_probe SDK_ROOT=/home/Tiger/Documents/code/linux/rv1126b_sdk/rv1126b_linux_ipc_xiaoyu
+DEVICE=/dev/video25 WIDTH=640 HEIGHT=360 FRAMES=4 \
+  ./run_v4l2_expbuf_probe.sh
+```
+
+Before setting its requested format, the probe records the node's current
+format. The cleanup path attempts `VIDIOC_STREAMOFF`, releases the queue with
+`VIDIOC_REQBUFS(count=0)`, restores that original format, and closes the V4L2
+device last. Since this capability probe never starts streaming, an `EINVAL`
+from `STREAMOFF` is reported as the expected already-stopped state; other
+ioctl, format-restore, or close failures fail the run. A returned buffer count
+may be smaller than requested and is reported. A successful
+`V4L2_EXPBUF_CAPABILITY_OK` result reports the number of physical planes and
+sets `single_fd_candidate=1` only for a one-plane layout. A two-plane `NV12M`
+result proves only that the node exported one DMA-BUF descriptor per plane; it
+is not directly compatible with RockIVA's single `dataFd`. Neither result
+proves that `v4l2src` will expose `GstDmaBufMemory`, that a GStreamer caps
+feature will negotiate, that `/dev/video24` is safe to share,
+or that RockIVA can consume the exported layout.
+
+## Native V4L2-to-RockIVA lifecycle probe
+
+`v4l2_rockiva_probe` is the next independent board experiment. It owns an
+explicit V4L2 `MMAP` capture queue, exports one DMA-BUF fd for each returned
+buffer, and passes that fd to `ROCKIVA_PushFrame` with CPU and physical
+addresses unset. It accepts only progressive NV12/NV12M whose negotiated
+physical plane count is one. An NV12M result with two physical planes is
+rejected before RockIVA because `RockIvaImage` has only one `dataFd`; the
+strict `sizeimage`/`bytesperline` check can also reject drivers whose trailing
+allocation padding does not describe an unambiguous NV12 `hstride`.
+
+The exported fd remains open while RockIVA owns the frame. The probe does not
+`VIDIOC_QBUF` a capture buffer until the release callback returns a matching
+`frameId`, channel and fd with unset CPU/physical pointers. Cleanup then runs
+in order: callback completion, released-buffer requeue, `STREAMOFF`, unmap,
+`REQBUFS(0)`, retained-fd close, original-format restore, and device close.
+Each `VIDIOC_DQBUF` must report one physical plane, zero `data_offset`, a
+nonzero plane length covering the negotiated NV12 allocation, and `bytesused`
+within that returned and queried length. If `STREAMOFF` fails, the probe does
+not unmap, release the queue, restore the format, or close the device; it leaves
+the ownership graph intact until process exit and reports the run as incomplete.
+When callback completion cannot be proven, the V4L2 queue, mappings and fd
+table remain alive until process exit rather than being torn down underneath
+the SDK. This is a lifecycle experiment, not a GStreamer negotiation test or
+a production mainpath integration.
+
+Build and run it against an unused selfpath node first:
+
+```sh
+make v4l2_rockiva_probe SDK_ROOT=/home/Tiger/Documents/code/linux/rv1126b_sdk/rv1126b_linux_ipc_xiaoyu
+DEVICE=/dev/video25 MODEL_PATH=/oem/usr/lib WIDTH=640 HEIGHT=360 FRAMES=30 \
+  ROCKIVA_LIB_DIR=/oem/usr/lib MIN_PERSON=1 MIN_TRACKING=1 \
+  ./run_v4l2_rockiva_probe.sh
+```
+
+`BUFFERS`, `MODEL`, `CHANNEL`, `CORE_MASK`, `TIMEOUT_MS`, `MIN_PERSON` and
+`MIN_TRACKING` are optional runner variables. The runner defaults the two
+observation thresholds to zero for an explicit empty-scene/lifecycle
+diagnostic; zero thresholds do not prove person detection or tracking. The
+`/dev/video24` production mainpath is rejected unless `ALLOW_MAINPATH=1` is
+set for an explicitly approved experiment. A successful build, capability
+probe or native process does not establish T1 detection quality, stable
+`objId` tracking, DMA-BUF compatibility with the production pipeline, or
+main-video isolation; record those only from representative board runs.
+
+## Camera DMA-BUF probe
+
+`rockiva_dmabuf_probe` is a separate AArch64 test executable. It creates its
+own GStreamer pipeline equivalent to:
+
+```text
+v4l2src device=PATH io-mode=dmabuf !
+  video/x-raw,format=NV12,width=W,height=H,framerate=FPS/1 ! appsink
+```
+
+The V4L2 device, model directory, dimensions, frame count and frame rate are
+required arguments. There is no implicit capture device. `/dev/video24` is
+rejected by default because it is the production mainpath; `--allow-mainpath`
+is required for an explicitly approved experiment. Use the unused selfpath
+device first, for example:
+
+```sh
+make rockiva_dmabuf_probe SDK_ROOT=/home/Tiger/Documents/code/linux/rv1126b_sdk/rv1126b_linux_ipc_xiaoyu
+DEVICE=/dev/video25 MODEL_PATH=/oem/usr/lib WIDTH=640 HEIGHT=360 \
+  FRAMES=30 FPS=10 ROCKIVA_LIB_DIR=/oem/usr/lib \
+  ./run_dmabuf_probe.sh
+```
+
+The probe accepts only one `GstBuffer` memory backed by one DMA-BUF fd, NV12,
+progressive dimensions, a zero Y-plane offset, matching positive Y/UV strides,
+and a contiguous UV offset described by `stride * hstride`. NV12 has two
+logical planes, but this probe requires both planes to reside in that one
+physical DMA-BUF memory because `RockIvaImage` has only one `dataFd`. The
+complete Y plus UV layout must fit both the `GstMemory` and the `GstBuffer`.
+When present, `GstVideoMeta` must describe two logical NV12 planes; otherwise
+the plane 0/1 offsets and strides from `GstVideoInfo` are used. The held
+GStreamer buffer reference is registered before `ROCKIVA_PushFrame` and is
+unreffed only after the release callback returns the matching frame ID and fd.
+The callback uses `RockIvaDetectResult.frameId` for detection association; it
+does not use `RockIvaObjectInfo.frameId`.
+
+As with the CPU probe, `ROCKIVA_WaitFinish == ROCKIVA_RET_UNSUPPORTED` is
+accepted only after a bounded condition-variable wait proves detection and
+matching release callbacks for every accepted frame. The appsink pipeline is
+stopped only after SDK ownership and callback accounting are proven complete;
+on an unsafe failure path it remains referenced until process exit to avoid a
+DMA-BUF use-after-free. The summary and exit status include sample validation,
+push, detection, release and SDK teardown results.
+
+The DMA-BUF runner defaults `MIN_PERSON=0` and `MIN_TRACKING=0` because this is
+a memory/lifetime experiment. Zero thresholds do not provide detection,
+tracking, accuracy, ID stability or event-quality evidence. A successful
+selfpath run proves only that this independent camera exporter can be passed to
+RockIVA; it does not prove that `/dev/video24` or the PID 576 production
+`media_engine` buffers can be shared. No host fault test is provided for this
+target: a synthetic host buffer would not exercise the V4L2 exporter and would
+make the DMA-BUF result misleading.
+
+The target links the staged `gstreamer-1.0`, `gstapp-1.0`, `gstvideo-1.0`,
+`gstallocators-1.0`, GLib and RockIVA libraries. The board also needs the
+matching GStreamer v4l2 plugin; set `GST_PLUGIN_PATH` explicitly if it is not
+under `${ROCKIVA_LIB_DIR}/gstreamer-1.0`.

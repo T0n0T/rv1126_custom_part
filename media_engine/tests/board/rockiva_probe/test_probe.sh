@@ -35,6 +35,23 @@ expect_failure()
 	echo "[PASS] $name returns failure"
 }
 
+expect_success()
+{
+	name=$1
+	input=$2
+	scenario=$3
+	pattern=$4
+	log=$TMP_DIR/$name.log
+
+	if ! ROCKIVA_STUB_SCENARIO=$scenario run_probe "$input" >"$log" 2>&1; then
+		echo "[FAIL] $name returned failure" >&2
+		cat "$log" >&2
+		exit 1
+	fi
+	grep -F "$pattern" "$log" >/dev/null
+	echo "[PASS] $name returns success"
+}
+
 NORMAL_LOG=$TMP_DIR/normal.log
 ROCKIVA_STUB_SCENARIO=normal run_probe "$NORMAL_INPUT" >"$NORMAL_LOG" 2>&1
 grep -F "summary pushed=2 push_failures=0" "$NORMAL_LOG" >/dev/null
@@ -48,6 +65,13 @@ ROCKIVA_STUB_SCENARIO=no_person "$PROBE" --model-path "$TMP_DIR" \
 	--timeout-ms 10 --min-person 0 --min-tracking 0 >"$DIAGNOSTIC_LOG" 2>&1
 grep -F "person=0 person_states[first=0 tracking=0" "$DIAGNOSTIC_LOG" >/dev/null
 echo "[PASS] zero thresholds explicitly permit empty-scene diagnostics"
+
+expect_success wait-unsupported "$NORMAL_INPUT" wait_unsupported \
+	"wait_finish ret=-5 status=unsupported capability fallback"
+expect_failure wait-unsupported-missing-release "$NORMAL_INPUT" \
+	wait_unsupported_missing_release "callback_completion timeout"
+expect_failure detection-duplicate "$NORMAL_INPUT" detection_duplicate \
+	"callback accounting invariant failed"
 
 expect_failure init-failure "$NORMAL_INPUT" init_fail "ROCKIVA_Init failed"
 expect_failure version-failure "$NORMAL_INPUT" version_fail "ROCKIVA_GetVersion failed"

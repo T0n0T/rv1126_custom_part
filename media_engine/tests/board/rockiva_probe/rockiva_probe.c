@@ -57,20 +57,33 @@ enum probe_frame_state {
 	PROBE_FRAME_REJECTED,
 };
 
+enum wait_finish_state {
+	WAIT_FINISH_NOT_ATTEMPTED = 0,
+	WAIT_FINISH_SUCCESS,
+	WAIT_FINISH_UNSUPPORTED,
+	WAIT_FINISH_FAILED,
+};
+
 struct probe_frame {
 	uint8_t *buffer;
 	uint64_t submitted_ns;
 	enum probe_frame_state state;
+	int detection_completed;
 };
 
 struct probe_state {
 	pthread_mutex_t metrics_lock;
+	pthread_cond_t callbacks_cond;
+	int callbacks_cond_initialized;
 	uint32_t channel_id;
 	uint64_t pushed;
 	uint64_t push_failures;
 	uint64_t detections;
 	uint64_t detection_errors;
 	uint64_t detection_frame_errors;
+	uint64_t detection_unmatched;
+	uint64_t detection_duplicates;
+	uint64_t detection_completed_frames;
 	uint64_t detection_object_overflows;
 	uint64_t person_observations;
 	uint64_t person_first_observations;
@@ -104,6 +117,88 @@ static uint64_t monotonic_ns(void)
 	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
 		return 0;
 	return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
+}
+
+static void signal_callbacks_locked(struct probe_state *state)
+{
+	if (state->callbacks_cond_initialized)
+		(void)pthread_cond_broadcast(&state->callbacks_cond);
+}
+
+static int callbacks_have_errors_locked(const struct probe_state *state)
+{
+	return state->detection_errors != 0 || state->detection_frame_errors != 0 ||
+	       state->detection_unmatched != 0 || state->detection_duplicates != 0 ||
+	       state->release_unmatched != 0 || state->release_duplicates != 0 ||
+	       state->release_mismatches != 0 || state->release_invalid_callbacks != 0 ||
+	       state->channel_mismatches != 0;
+}
+
+static int callbacks_complete_locked(const struct probe_state *state)
+{
+	return state->detection_completed_frames == state->pushed &&
+	       state->released_frames == state->pushed && !callbacks_have_errors_locked(state);
+}
+
+static int make_deadline(struct timespec *deadline, int timeout_ms)
+{
+	if (clock_gettime(CLOCK_MONOTONIC, deadline) != 0)
+		return -1;
+	deadline->tv_sec += timeout_ms / 1000;
+	deadline->tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+	if (deadline->tv_nsec >= 1000000000L) {
+		deadline->tv_sec++;
+		deadline->tv_nsec -= 1000000000L;
+	}
+	return 0;
+}
+
+static int wait_for_callback_completion(struct probe_state *state, int timeout_ms)
+{
+	struct timespec deadline;
+	int wait_result;
+
+	if (!state->callbacks_cond_initialized || make_deadline(&deadline, timeout_ms) != 0) {
+		fprintf(stderr, "cannot establish bounded callback wait\n");
+		return -1;
+	}
+
+	pthread_mutex_lock(&state->metrics_lock);
+	for (;;) {
+		if (callbacks_complete_locked(state)) {
+			printf("callback_completion status=complete pushed=%" PRIu64
+			       " detection_completed=%" PRIu64 " released=%" PRIu64 "\n",
+			       state->pushed, state->detection_completed_frames,
+			       state->released_frames);
+			pthread_mutex_unlock(&state->metrics_lock);
+			return 0;
+		}
+		if (callbacks_have_errors_locked(state)) {
+			fprintf(stderr, "callback_completion failed: callback accounting error"
+				" pushed=%" PRIu64 " detection_completed=%" PRIu64
+				" released=%" PRIu64 "\n",
+				state->pushed, state->detection_completed_frames,
+				state->released_frames);
+			pthread_mutex_unlock(&state->metrics_lock);
+			return -1;
+		}
+		wait_result = pthread_cond_timedwait(&state->callbacks_cond,
+							    &state->metrics_lock, &deadline);
+		if (wait_result == ETIMEDOUT) {
+			fprintf(stderr, "callback_completion timeout: accepted=%" PRIu64
+				" detection_completed=%" PRIu64 " released=%" PRIu64 "\n",
+				state->pushed, state->detection_completed_frames,
+				state->released_frames);
+			pthread_mutex_unlock(&state->metrics_lock);
+			return -1;
+		}
+		if (wait_result != 0) {
+			fprintf(stderr, "callback_completion wait failed: %s\n",
+				strerror(wait_result));
+			pthread_mutex_unlock(&state->metrics_lock);
+			return -1;
+		}
+	}
 }
 
 static const char *model_name(RockIvaDetModel model)
@@ -356,6 +451,7 @@ static void detect_callback(const RockIvaDetectResult *result,
 				    const RockIvaExecuteStatus status, void *userdata)
 {
 	struct probe_state *state = userdata;
+	struct probe_frame *record = NULL;
 	uint64_t now = monotonic_ns();
 	uint64_t submitted;
 	uint32_t i;
@@ -373,13 +469,25 @@ static void detect_callback(const RockIvaDetectResult *result,
 	       status, result ? result->frameId : 0, result ? result->channelId : 0,
 	       result ? result->objNum : 0);
 	if (!result || status != ROCKIVA_SUCCESS) {
+		signal_callbacks_locked(state);
 		pthread_mutex_unlock(&state->metrics_lock);
 		return;
 	}
 	if (result->channelId != state->channel_id)
 		state->channel_mismatches++;
-	if (result->frameId >= state->frame_count)
+	if (result->frameId >= state->frame_count) {
 		state->detection_frame_errors++;
+	} else {
+		record = &state->frames[result->frameId];
+		if (record->state == PROBE_FRAME_UNUSED || record->state == PROBE_FRAME_REJECTED)
+			state->detection_unmatched++;
+		else if (record->detection_completed)
+			state->detection_duplicates++;
+		else {
+			record->detection_completed = 1;
+			state->detection_completed_frames++;
+		}
+	}
 	submitted = result->frameId < state->frame_count
 			? state->frames[result->frameId].submitted_ns
 			: 0;
@@ -393,6 +501,7 @@ static void detect_callback(const RockIvaDetectResult *result,
 		count_person_state(state, &result->objInfo[i]);
 		print_object(&result->objInfo[i]);
 	}
+	signal_callbacks_locked(state);
 	pthread_mutex_unlock(&state->metrics_lock);
 }
 
@@ -409,6 +518,7 @@ static void release_callback(const RockIvaReleaseFrames *frames, void *userdata)
 	state->release_callbacks++;
 	if (!frames) {
 		state->release_invalid_callbacks++;
+		signal_callbacks_locked(state);
 		pthread_mutex_unlock(&state->metrics_lock);
 		return;
 	}
@@ -461,6 +571,7 @@ static void release_callback(const RockIvaReleaseFrames *frames, void *userdata)
 		/* Only free buffers allocated by this probe, never arbitrary SDK pointers. */
 		free(owned_buffer);
 	}
+	signal_callbacks_locked(state);
 	pthread_mutex_unlock(&state->metrics_lock);
 }
 
@@ -511,12 +622,21 @@ static void free_unreturned_buffers(struct probe_state *state)
 	pthread_mutex_unlock(&state->metrics_lock);
 }
 
-static int wait_finish(RockIvaHandle handle, int timeout_ms, const char *label)
+static enum wait_finish_state wait_finish(RockIvaHandle handle, int timeout_ms,
+						  const char *label)
 {
 	RockIvaRetCode ret = ROCKIVA_WaitFinish(handle, -1, timeout_ms);
 
-	printf("%s ret=%d\n", label, ret);
-	return ret == ROCKIVA_RET_SUCCESS ? 0 : -1;
+	if (ret == ROCKIVA_RET_SUCCESS) {
+		printf("%s ret=%d status=success\n", label, ret);
+		return WAIT_FINISH_SUCCESS;
+	}
+	if (ret == ROCKIVA_RET_UNSUPPORTED) {
+		printf("%s ret=%d status=unsupported capability fallback\n", label, ret);
+		return WAIT_FINISH_UNSUPPORTED;
+	}
+	printf("%s ret=%d status=failure\n", label, ret);
+	return WAIT_FINISH_FAILED;
 }
 
 int main(int argc, char **argv)
@@ -528,17 +648,23 @@ int main(int argc, char **argv)
 	RockIvaHandle handle = NULL;
 	RockIvaRetCode ret;
 	FILE *input = NULL;
+	pthread_condattr_t cond_attr;
 	uint64_t frame_size;
 	unsigned int frame;
 	char version[MAX_VERSION] = {0};
 	int parse_result;
+	int cond_attr_result;
+	int cond_attr_initialized = 0;
 	int operation_failed = 0;
 	int metrics_lock_initialized = 0;
+	int callbacks_cond_initialized = 0;
 	int handle_initialized = 0;
 	int detect_initialized = 0;
-	int wait_succeeded = 0;
-	int final_wait_succeeded = 0;
+	int initial_cleanup_safe = 0;
+	int final_cleanup_safe = 0;
 	int release_succeeded = 0;
+	enum wait_finish_state wait_state = WAIT_FINISH_NOT_ATTEMPTED;
+	enum wait_finish_state final_wait_state = WAIT_FINISH_NOT_ATTEMPTED;
 
 	parse_result = parse_options(argc, argv, &options);
 	if (parse_result != 0)
@@ -550,6 +676,24 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	metrics_lock_initialized = 1;
+	cond_attr_result = pthread_condattr_init(&cond_attr);
+	if (cond_attr_result == 0) {
+		cond_attr_initialized = 1;
+		cond_attr_result = pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
+	}
+	if (cond_attr_result == 0)
+		cond_attr_result = pthread_cond_init(&state.callbacks_cond, &cond_attr);
+	if (cond_attr_result == 0)
+		state.callbacks_cond_initialized = 1;
+	if (cond_attr_initialized)
+		(void)pthread_condattr_destroy(&cond_attr);
+	if (cond_attr_result != 0) {
+		fprintf(stderr, "cannot initialize callback condition variable: %s\n",
+			strerror(cond_attr_result));
+		operation_failed = 1;
+		goto done;
+	}
+	callbacks_cond_initialized = 1;
 	state.channel_id = options.channel_id;
 	if (options.width > UINT16_MAX || options.height > UINT16_MAX) {
 		fprintf(stderr, "frame dimensions exceed RockIVA limits\n");
@@ -629,7 +773,7 @@ int main(int argc, char **argv)
 	if (ret != ROCKIVA_RET_SUCCESS) {
 		fprintf(stderr, "ROCKIVA_DETECT_Init failed: %d\n", ret);
 		operation_failed = 1;
-		goto release_handle;
+		goto release_detect;
 	}
 	detect_initialized = 1;
 	ret = ROCKIVA_SetFrameReleaseCallback(handle, release_callback);
@@ -694,18 +838,38 @@ int main(int argc, char **argv)
 		printf("push frame_id=%u ret=%d\n", frame + 1, ret);
 		sleep_for_frame(options.fps);
 	}
-	if (wait_finish(handle, options.timeout_ms, "wait_finish") == 0)
-		wait_succeeded = 1;
-	else
+	wait_state = wait_finish(handle, options.timeout_ms, "wait_finish");
+	if (wait_state == WAIT_FINISH_SUCCESS) {
+		initial_cleanup_safe = 1;
+	} else if (wait_state == WAIT_FINISH_UNSUPPORTED) {
+		printf("wait_finish capability fallback: waiting for callback completion\n");
+		if (wait_for_callback_completion(&state, options.timeout_ms) == 0)
+			initial_cleanup_safe = 1;
+		else
+			operation_failed = 1;
+	} else {
 		operation_failed = 1;
+	}
 
 release_detect:
-	if (!wait_succeeded && wait_finish(handle, options.timeout_ms,
-						  "cleanup_wait_finish") == 0)
-		wait_succeeded = 1;
+	if (handle_initialized && !initial_cleanup_safe &&
+	    (wait_state == WAIT_FINISH_NOT_ATTEMPTED || wait_state == WAIT_FINISH_FAILED)) {
+		wait_state = wait_finish(handle, options.timeout_ms, "cleanup_wait_finish");
+		if (wait_state == WAIT_FINISH_SUCCESS) {
+			initial_cleanup_safe = 1;
+		} else if (wait_state == WAIT_FINISH_UNSUPPORTED) {
+			printf("cleanup_wait_finish capability fallback: waiting for callback completion\n");
+			if (wait_for_callback_completion(&state, options.timeout_ms) == 0)
+				initial_cleanup_safe = 1;
+			else
+				operation_failed = 1;
+		} else {
+			operation_failed = 1;
+		}
+	}
 	if (detect_initialized) {
-		if (!wait_succeeded) {
-			fprintf(stderr, "skipping ROCKIVA_DETECT_Release after wait failure\n");
+		if (!initial_cleanup_safe) {
+			fprintf(stderr, "skipping ROCKIVA_DETECT_Release: callback completion not confirmed\n");
 		} else {
 			ret = ROCKIVA_DETECT_Release(handle);
 			printf("detect_release ret=%d\n", ret);
@@ -713,30 +877,52 @@ release_detect:
 				operation_failed = 1;
 		}
 	}
-release_handle:
 	if (handle_initialized) {
-		if (wait_finish(handle, options.timeout_ms, "final_wait_finish") == 0)
-			final_wait_succeeded = 1;
-		else
+		if (!initial_cleanup_safe) {
+			fprintf(stderr, "skipping final_wait_finish and ROCKIVA_Release after "
+				"incomplete callback completion\n");
+			goto done;
+		}
+		final_wait_state = wait_finish(handle, options.timeout_ms, "final_wait_finish");
+		if (final_wait_state == WAIT_FINISH_SUCCESS) {
+			final_cleanup_safe = 1;
+		} else if (final_wait_state == WAIT_FINISH_UNSUPPORTED) {
+			printf("final_wait_finish capability fallback: waiting for callback completion\n");
+			if (wait_for_callback_completion(&state, options.timeout_ms) == 0)
+				final_cleanup_safe = 1;
+			else
+				operation_failed = 1;
+		} else {
 			operation_failed = 1;
-		/* Always tear down the SDK; an unsuccessful wait only disables buffer cleanup. */
-		ret = ROCKIVA_Release(handle);
-		printf("release ret=%d\n", ret);
-		if (ret != ROCKIVA_RET_SUCCESS)
-			operation_failed = 1;
-		else
-			release_succeeded = 1;
-		if (release_succeeded)
-			handle = NULL;
+		}
+		if (final_cleanup_safe) {
+			ret = ROCKIVA_Release(handle);
+			printf("release ret=%d\n", ret);
+			if (ret != ROCKIVA_RET_SUCCESS)
+				operation_failed = 1;
+			else
+				release_succeeded = 1;
+			if (release_succeeded)
+				handle = NULL;
+		} else {
+			fprintf(stderr, "skipping ROCKIVA_Release after wait failure\n");
+		}
 	}
 done:
-	if (handle_initialized && (!final_wait_succeeded || !release_succeeded))
+	if (handle_initialized && (!final_cleanup_safe || !release_succeeded))
 		fprintf(stderr, "frame ownership cleanup deferred after incomplete SDK shutdown\n");
-	if (handle_initialized && final_wait_succeeded && release_succeeded)
+	if (handle_initialized && final_cleanup_safe && release_succeeded)
 		free_unreturned_buffers(&state);
 	else if (handle_initialized)
 		fprintf(stderr, "unreturned buffers remain owned by RockIVA after shutdown failure\n");
 	pthread_mutex_lock(&state.metrics_lock);
+	if (!callbacks_complete_locked(&state)) {
+		fprintf(stderr, "callback accounting invariant failed: pushed=%" PRIu64
+				" detection_completed=%" PRIu64 " released=%" PRIu64 "\n",
+				state.pushed, state.detection_completed_frames,
+				state.released_frames);
+		operation_failed = 1;
+	}
 	if (state.pushed != options.frames || state.push_failures != 0 ||
 	    state.released_frames != state.pushed || state.detection_errors != 0 ||
 	    state.detection_frame_errors != 0 || state.detection_object_overflows != 0 ||
@@ -755,7 +941,7 @@ done:
 			options.min_tracking_observations);
 		operation_failed = 1;
 	}
-	if (handle_initialized && (!final_wait_succeeded || !release_succeeded))
+	if (handle_initialized && (!final_cleanup_safe || !release_succeeded))
 		operation_failed = 1;
 	if (handle_initialized && release_succeeded &&
 	    state.released_frames != state.pushed)
@@ -789,7 +975,7 @@ done:
                                      : 0.0);
 	pthread_mutex_unlock(&state.metrics_lock);
 	/* Keep the table alive when the SDK did not confirm all asynchronous work ended. */
-	if (!handle_initialized || (final_wait_succeeded && release_succeeded)) {
+	if (!handle_initialized || (final_cleanup_safe && release_succeeded)) {
 		free(state.frames);
 		state.frames = NULL;
 	}
@@ -798,8 +984,11 @@ done:
 			strerror(errno));
 		operation_failed = 1;
 	}
+	if (callbacks_cond_initialized &&
+	    (!handle_initialized || (final_cleanup_safe && release_succeeded)))
+		(void)pthread_cond_destroy(&state.callbacks_cond);
 	if (metrics_lock_initialized &&
-	    (!handle_initialized || (final_wait_succeeded && release_succeeded)))
+	    (!handle_initialized || (final_cleanup_safe && release_succeeded)))
 		pthread_mutex_destroy(&state.metrics_lock);
 	return operation_failed ? 1 : 0;
 }
