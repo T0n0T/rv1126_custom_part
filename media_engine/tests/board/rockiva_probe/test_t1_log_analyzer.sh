@@ -73,6 +73,16 @@ expect_contains longest-id \
 expect_contains non-unique-totals \
 	'totals person=999 tracking=888 note=observation_totals_not_unique_people' "$OUTPUT"
 
+LEGACY_FIXTURE=$TMP_DIR/legacy-summary.log
+sed 's/ mode=finite//' "$FIXTURE" >"$LEGACY_FIXTURE"
+LEGACY_OUTPUT=$TMP_DIR/legacy-summary.out
+if ! "$ANALYZER" "$LEGACY_FIXTURE" >"$LEGACY_OUTPUT" 2>&1; then
+	cat "$LEGACY_OUTPUT" >&2
+	fail 'legacy summary log returned failure'
+fi
+expect_contains legacy-summary \
+	'final_summary summary captures=24 stop=limit' "$LEGACY_OUTPUT"
+
 STDIN_OUTPUT=$TMP_DIR/stdin.log
 if ! "$ANALYZER" - <"$FIXTURE" >"$STDIN_OUTPUT" 2>&1; then
 	cat "$STDIN_OUTPUT" >&2

@@ -246,7 +246,8 @@ log, or use `-` to read stdin:
 cat /tmp/t1-events-v5.log | ./analyze_t1_log.sh -
 ```
 
-The report repeats the final `summary captures=... mode=...` line, extracts the
+The report repeats the final non-periodic `summary captures=...` line (both the
+current `mode=...` form and older summaries without `mode` are accepted), extracts the
 capture/push/detect/release and sequence/capture/release error fields, counts
 unique `obj_id` values only from `person_event` lines, and prints transition
 counts, per-ID first/last `callback_frame_id`, event counts, and the longest ID

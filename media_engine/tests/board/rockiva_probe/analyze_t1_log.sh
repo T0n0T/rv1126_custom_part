@@ -114,7 +114,7 @@ BEGIN {
 	required[10] = "release_mismatches"
 }
 
-$1 == "summary" && field("captures") != "" && field("mode") != "" {
+$1 == "summary" && field("captures") != "" && field("periodic") == "" {
 	remember_summary()
 	next
 }
