@@ -1997,7 +1997,7 @@ cleanup:
 	       state.released_frames, state.release_unmatched,
 	       state.release_duplicates, state.release_mismatches,
 	       state.person_observations, state.person_tracking_observations,
-	       result == 0 ? "complete" : "incomplete",
+	       v4l2_cleanup_safe ? "complete" : "incomplete",
 	       result == 0 ? "candidate_only_record_board_evidence" : "not_claimed");
 	if (metrics_lock_initialized)
 		pthread_mutex_unlock(&state.metrics_lock);
