@@ -164,7 +164,7 @@ $1 == "summary" && field("captures") != "" && field("periodic") == "" {
 
 END {
 	if (!final_seen)
-		set_error("final summary not found (expected: summary captures=... mode=...)")
+		set_error("final summary not found (expected: non-periodic summary captures=...)")
 	else {
 		for (i = 1; i <= required_count; i++) {
 			key = required[i]
