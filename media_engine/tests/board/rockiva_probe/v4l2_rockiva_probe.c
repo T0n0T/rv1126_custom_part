@@ -22,6 +22,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <signal.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -40,11 +42,25 @@
 #define DEFAULT_CORE_MASK 0U
 #define DEFAULT_BUFFERS 4U
 #define DEFAULT_TIMEOUT_MS 5000
+#define DEFAULT_REPORT_INTERVAL_MS 5000U
 #define DEFAULT_MIN_PERSON_OBSERVATIONS 0U
 #define DEFAULT_MIN_TRACKING_OBSERVATIONS 0U
 #define MAX_QUEUE_BUFFERS 64U
 #define MAX_CAPTURE_FRAMES 10000U
 #define MAX_VERSION 128U
+
+enum probe_log_level {
+	PROBE_LOG_QUIET = 0,
+	PROBE_LOG_SUMMARY,
+	PROBE_LOG_EVENTS,
+	PROBE_LOG_ALL,
+};
+
+enum probe_output_class {
+	PROBE_OUTPUT_DETAIL = 0,
+	PROBE_OUTPUT_EVENT,
+	PROBE_OUTPUT_SUMMARY,
+};
 
 struct probe_options {
 	const char *device;
@@ -57,9 +73,12 @@ struct probe_options {
 	unsigned int core_mask;
 	RockIvaDetModel model;
 	int timeout_ms;
+	unsigned int report_interval_ms;
 	unsigned int min_person_observations;
 	unsigned int min_tracking_observations;
 	int allow_mainpath;
+	int continuous;
+	enum probe_log_level log_level;
 };
 
 struct capture_buffer {
@@ -95,6 +114,12 @@ struct probe_frame {
 	int requeued;
 };
 
+struct person_state_entry {
+	uint32_t obj_id;
+	int state;
+	int active;
+};
+
 struct probe_state {
 	pthread_mutex_t metrics_lock;
 	pthread_cond_t callbacks_cond;
@@ -104,6 +129,9 @@ struct probe_state {
 	unsigned int buffer_count;
 	struct probe_frame *frames;
 	size_t frame_count;
+	uint32_t next_frame_id;
+	unsigned int person_state_cursor;
+	struct person_state_entry person_states[ROCKIVA_MAX_OBJ_NUM];
 	uint64_t captures;
 	uint64_t qbufs;
 	uint64_t qbuf_failures;
@@ -142,6 +170,55 @@ struct probe_state {
 	uint64_t release_latency_max_ns;
 };
 
+static enum probe_log_level configured_log_level = PROBE_LOG_ALL;
+static volatile sig_atomic_t stop_requested;
+
+static void stop_signal_handler(int signal_number)
+{
+	(void)signal_number;
+	stop_requested = 1;
+}
+
+static int install_stop_handlers(void)
+{
+	struct sigaction action;
+
+	memset(&action, 0, sizeof(action));
+	action.sa_handler = stop_signal_handler;
+	if (sigemptyset(&action.sa_mask) != 0 ||
+	    sigaction(SIGINT, &action, NULL) != 0 ||
+	    sigaction(SIGTERM, &action, NULL) != 0)
+		return -1;
+	return 0;
+}
+
+static int output_enabled(enum probe_output_class output_class)
+{
+	switch (configured_log_level) {
+	case PROBE_LOG_ALL:
+		return 1;
+	case PROBE_LOG_EVENTS:
+		return output_class != PROBE_OUTPUT_DETAIL;
+	case PROBE_LOG_SUMMARY:
+		return output_class == PROBE_OUTPUT_SUMMARY;
+	case PROBE_LOG_QUIET:
+	default:
+		return 0;
+	}
+}
+
+static void log_printf(enum probe_output_class output_class, const char *format,
+			       ...)
+{
+	va_list arguments;
+
+	if (!output_enabled(output_class))
+		return;
+	va_start(arguments, format);
+	vprintf(format, arguments);
+	va_end(arguments);
+}
+
 static uint64_t monotonic_ns(void)
 {
 	struct timespec ts;
@@ -172,15 +249,98 @@ static void update_latency(uint64_t submitted, uint64_t now, uint64_t *count,
 		*min_ns = latency;
 	if (latency > *max_ns)
 		*max_ns = latency;
-	printf("  %s_latency_ms=%.3f\n", label, (double)latency / 1000000.0);
+	log_printf(PROBE_OUTPUT_DETAIL, "  %s_latency_ms=%.3f\n", label,
+		   (double)latency / 1000000.0);
 }
 
 static struct probe_frame *find_frame_locked(struct probe_state *state,
 						     uint32_t frame_id)
 {
-	if (frame_id == 0 || frame_id >= state->frame_count)
+	size_t i;
+
+	if (frame_id == 0)
 		return NULL;
-	return &state->frames[frame_id];
+	for (i = 0; i < state->frame_count; i++) {
+		if (state->frames[i].state != FRAME_UNUSED &&
+		    state->frames[i].frame_id == frame_id)
+			return &state->frames[i];
+	}
+	return NULL;
+}
+
+static uint32_t next_frame_id_locked(struct probe_state *state)
+{
+	uint32_t candidate;
+	unsigned int attempts;
+
+	/* Allow one extra probe for the reserved zero ID when the counter wraps. */
+	for (attempts = 0; attempts < state->frame_count + 2U; attempts++) {
+		candidate = state->next_frame_id++;
+		if (candidate == 0)
+			continue;
+		if (!find_frame_locked(state, candidate))
+			return candidate;
+	}
+	return 0;
+}
+
+static const char *object_state_name(int object_state)
+{
+	switch (object_state) {
+	case ROCKIVA_OBJECT_STATE_NONE:
+		return "NONE";
+	case ROCKIVA_OBJECT_STATE_FIRST:
+		return "FIRST";
+	case ROCKIVA_OBJECT_STATE_TRACKING:
+		return "TRACKING";
+	case ROCKIVA_OBJECT_STATE_LOST:
+		return "LOST";
+	case ROCKIVA_OBJECT_STATE_DISPEAR:
+		return "DISAPPEAR";
+	default:
+		return "UNKNOWN";
+	}
+}
+
+static struct person_state_entry *find_person_state_locked(
+						struct probe_state *state, uint32_t obj_id)
+{
+	unsigned int i;
+	struct person_state_entry *free_entry = NULL;
+
+	for (i = 0; i < ROCKIVA_MAX_OBJ_NUM; i++) {
+		struct person_state_entry *entry = &state->person_states[i];
+
+		if (entry->obj_id == obj_id &&
+		    (entry->active || entry->state == ROCKIVA_OBJECT_STATE_DISPEAR))
+			return entry;
+		if (!entry->active && !free_entry)
+			free_entry = entry;
+	}
+	if (free_entry)
+		return free_entry;
+	/* Object IDs are scoped by this probe run. Reuse a fixed slot when a
+	 * driver reports more IDs over time than can be live in one result. */
+	return &state->person_states[state->person_state_cursor++ %
+					ROCKIVA_MAX_OBJ_NUM];
+}
+
+static int update_person_state_locked(struct probe_state *state,
+					      const RockIvaObjectInfo *object,
+					      int *previous_state)
+{
+	struct person_state_entry *entry;
+	int changed;
+
+	if (object->type != ROCKIVA_OBJECT_TYPE_PERSON)
+		return 0;
+	entry = find_person_state_locked(state, object->objId);
+	*previous_state = entry->active ? entry->state : ROCKIVA_OBJECT_STATE_NONE;
+	changed = !entry->active || entry->state != (int)object->state;
+	entry->obj_id = object->objId;
+	entry->state = (int)object->state;
+	entry->active = object->state != ROCKIVA_OBJECT_STATE_DISPEAR;
+	return changed;
 }
 
 static int callbacks_have_errors_locked(const struct probe_state *state)
@@ -224,7 +384,8 @@ static int wait_for_callback_completion(struct probe_state *state, int timeout_m
 	pthread_mutex_lock(&state->metrics_lock);
 	for (;;) {
 		if (callbacks_complete_locked(state)) {
-			printf("callback_completion status=complete accepted=%" PRIu64
+			log_printf(PROBE_OUTPUT_SUMMARY,
+			       "callback_completion status=complete accepted=%" PRIu64
 			       " detection_completed=%" PRIu64 " released=%" PRIu64 "\n",
 			       state->accepted_frames, state->detection_completed_frames,
 			       state->released_frames);
@@ -284,9 +445,25 @@ static void count_person_state(struct probe_state *state,
 
 static void print_object(const RockIvaObjectInfo *object)
 {
-	printf("  object obj_id=%" PRIu32 " state=%d type=%d score=%" PRIu32
+	log_printf(PROBE_OUTPUT_DETAIL,
+	       "  object obj_id=%" PRIu32 " state=%s(%d) type=%d score=%" PRIu32
 	       " frame_id=%" PRIu32 " rect=%d,%d-%d,%d timestamp=%lu\n",
-	       object->objId, object->state, object->type, object->score,
+	       object->objId, object_state_name(object->state), object->state,
+	       object->type, object->score,
+	       object->frameId, object->rect.topLeft.x, object->rect.topLeft.y,
+	       object->rect.bottomRight.x, object->rect.bottomRight.y,
+	       object->timestamp);
+}
+
+static void print_person_event(const RockIvaObjectInfo *object,
+				       int previous_state)
+{
+	log_printf(PROBE_OUTPUT_EVENT,
+	       "person_event obj_id=%" PRIu32 " transition=%s->%s state=%s(%d)"
+	       " score=%" PRIu32 " frame_id=%" PRIu32
+	       " rect=%d,%d-%d,%d timestamp=%lu\n", object->objId,
+	       object_state_name(previous_state), object_state_name(object->state),
+	       object_state_name(object->state), object->state, object->score,
 	       object->frameId, object->rect.topLeft.x, object->rect.topLeft.y,
 	       object->rect.bottomRight.x, object->rect.bottomRight.y,
 	       object->timestamp);
@@ -309,7 +486,8 @@ static void detect_callback(const RockIvaDetectResult *result,
 	state->detections++;
 	if (status != ROCKIVA_SUCCESS || !result)
 		state->detection_errors++;
-	printf("detect status=%d frame_id=%" PRIu32 " channel_id=%" PRIu32
+	log_printf(PROBE_OUTPUT_DETAIL,
+	       "detect status=%d frame_id=%" PRIu32 " channel_id=%" PRIu32
 	       " objects=%" PRIu32 "\n", status, result ? result->frameId : 0,
 	       result ? result->channelId : 0, result ? result->objNum : 0);
 	if (!result || status != ROCKIVA_SUCCESS) {
@@ -336,7 +514,14 @@ static void detect_callback(const RockIvaDetectResult *result,
 	if (result->objNum > ROCKIVA_MAX_OBJ_NUM)
 		state->detection_object_overflows++;
 	for (i = 0; i < result->objNum && i < ROCKIVA_MAX_OBJ_NUM; i++) {
+		int previous_state;
+		int state_changed;
+
 		count_person_state(state, &result->objInfo[i]);
+		state_changed = update_person_state_locked(state, &result->objInfo[i],
+							    &previous_state);
+		if (state_changed)
+			print_person_event(&result->objInfo[i], previous_state);
 		print_object(&result->objInfo[i]);
 	}
 	signal_callbacks_locked(state);
@@ -362,7 +547,8 @@ static void release_callback(const RockIvaReleaseFrames *frames, void *userdata)
 		return;
 	}
 	state->release_entries += frames->count;
-	printf("release channel_id=%" PRIu32 " count=%" PRIu32 "\n",
+	log_printf(PROBE_OUTPUT_DETAIL, "release channel_id=%" PRIu32 " count=%" PRIu32
+	       "\n",
 	       frames->channelId, frames->count);
 	if (frames->channelId != state->channel_id)
 		state->channel_mismatches++;
@@ -383,7 +569,8 @@ static void release_callback(const RockIvaReleaseFrames *frames, void *userdata)
 		uint64_t now = monotonic_ns();
 		uint64_t submitted = record ? record->submitted_ns : 0;
 
-		printf("  released frame_id=%" PRIu32 " buffer=%u fd=%" PRId32
+		log_printf(PROBE_OUTPUT_DETAIL,
+		       "  released frame_id=%" PRIu32 " buffer=%u fd=%" PRId32
 		       " data=%p phy=%p\n", released->frameId,
 		       record ? record->buffer_index : UINT_MAX, released->dataFd,
 		       (void *)released->dataAddr, (void *)released->dataPhyAddr);
@@ -470,16 +657,47 @@ static const char *model_name(RockIvaDetModel model)
 	}
 }
 
+static int parse_log_level(const char *value, enum probe_log_level *level)
+{
+	if (!strcmp(value, "quiet"))
+		*level = PROBE_LOG_QUIET;
+	else if (!strcmp(value, "summary"))
+		*level = PROBE_LOG_SUMMARY;
+	else if (!strcmp(value, "events"))
+		*level = PROBE_LOG_EVENTS;
+	else if (!strcmp(value, "all"))
+		*level = PROBE_LOG_ALL;
+	else
+		return -1;
+	return 0;
+}
+
+static const char *log_level_name(enum probe_log_level level)
+{
+	switch (level) {
+	case PROBE_LOG_QUIET:
+		return "quiet";
+	case PROBE_LOG_SUMMARY:
+		return "summary";
+	case PROBE_LOG_EVENTS:
+		return "events";
+	case PROBE_LOG_ALL:
+	default:
+		return "all";
+	}
+}
+
 static void usage(const char *program)
 {
 	fprintf(stderr, "usage: %s --device PATH --model-path DIR --width N "
-		"--height N --frames N [options]\n", program);
+		"--height N (--frames N | --continuous) [options]\n", program);
 	fprintf(stderr, "  --device PATH       V4L2 node (required)\n");
 	fprintf(stderr, "  --allow-mainpath    explicitly permit /dev/video24\n");
 	fprintf(stderr, "  --model-path DIR    RockIVA model directory (required)\n");
 	fprintf(stderr, "  --width N           requested NV12 width (required)\n");
 	fprintf(stderr, "  --height N          requested NV12 height (required)\n");
-	fprintf(stderr, "  --frames N          captured frame count (required)\n");
+	fprintf(stderr, "  --frames N          captured frame count (required unless --continuous)\n");
+	fprintf(stderr, "  --continuous        capture until SIGINT/SIGTERM\n");
 	fprintf(stderr, "  --buffers N         V4L2 queue depth (default: %u)\n",
 		DEFAULT_BUFFERS);
 	fprintf(stderr, "  --model pfp|cls8|person (default: pfp)\n");
@@ -489,6 +707,9 @@ static void usage(const char *program)
 		DEFAULT_CORE_MASK);
 	fprintf(stderr, "  --timeout-ms N       per-frame/callback timeout (default: %d)\n",
 		DEFAULT_TIMEOUT_MS);
+	fprintf(stderr, "  --log-level LEVEL    quiet|summary|events|all (default: all)\n");
+	fprintf(stderr, "  --report-interval-ms N periodic summary interval (default: %u; 0 disables)\n",
+		DEFAULT_REPORT_INTERVAL_MS);
 	fprintf(stderr, "  --min-person N       minimum person observations (default: %u)\n",
 		DEFAULT_MIN_PERSON_OBSERVATIONS);
 	fprintf(stderr, "  --min-tracking N     minimum TRACKING observations (default: %u)\n",
@@ -509,8 +730,11 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 		{"channel", required_argument, NULL, 'c'},
 		{"core-mask", required_argument, NULL, 'k'},
 		{"timeout-ms", required_argument, NULL, 't'},
+		{"log-level", required_argument, NULL, 'l'},
+		{"report-interval-ms", required_argument, NULL, 'i'},
 		{"min-person", required_argument, NULL, 'p'},
 		{"min-tracking", required_argument, NULL, 'r'},
+		{"continuous", no_argument, NULL, 'C'},
 		{"help", no_argument, NULL, 'H'},
 		{NULL, 0, NULL, 0},
 	};
@@ -525,9 +749,11 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 	options->channel_id = DEFAULT_CHANNEL;
 	options->core_mask = DEFAULT_CORE_MASK;
 	options->timeout_ms = DEFAULT_TIMEOUT_MS;
+	options->report_interval_ms = DEFAULT_REPORT_INTERVAL_MS;
+	options->log_level = PROBE_LOG_ALL;
 	options->min_person_observations = DEFAULT_MIN_PERSON_OBSERVATIONS;
 	options->min_tracking_observations = DEFAULT_MIN_TRACKING_OBSERVATIONS;
-	while ((option = getopt_long(argc, argv, "dam:w:h:n:b:M:c:k:t:p:r:H",
+	while ((option = getopt_long(argc, argv, "dam:w:h:n:b:M:c:k:t:l:i:p:r:CH",
 					long_options, NULL)) != -1) {
 		switch (option) {
 		case 'd':
@@ -578,6 +804,14 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 			options->timeout_ms = (int)timeout;
 			break;
 		}
+		case 'l':
+			if (parse_log_level(optarg, &options->log_level) != 0)
+				return -1;
+			break;
+		case 'i':
+			if (parse_uint(optarg, INT32_MAX, &options->report_interval_ms) != 0)
+				return -1;
+			break;
 		case 'p':
 			if (parse_uint(optarg, UINT32_MAX, &options->min_person_observations) != 0)
 				return -1;
@@ -585,6 +819,9 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 		case 'r':
 			if (parse_uint(optarg, UINT32_MAX, &options->min_tracking_observations) != 0)
 				return -1;
+			break;
+		case 'C':
+			options->continuous = 1;
 			break;
 		case 'H':
 			usage(argv[0]);
@@ -595,8 +832,16 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 	}
 	if (optind != argc || !options->device || !options->device[0] ||
 	    !options->model_path || !options->model_path[0] || !have_width ||
-	    !have_height || !have_frames || options->width % 2 != 0 ||
-	    options->height % 2 != 0 || options->frames == UINT32_MAX) {
+	    !have_height || (!options->continuous && !have_frames) ||
+	    options->width % 2 != 0 || options->height % 2 != 0) {
+		return -1;
+	}
+	if (options->continuous && have_frames) {
+		fprintf(stderr, "--frames cannot be used with --continuous\n");
+		return -1;
+	}
+	if (options->continuous && options->allow_mainpath) {
+		fprintf(stderr, "--continuous cannot be used with --allow-mainpath\n");
 		return -1;
 	}
 	if (rockiva_probe_is_mainpath(options->device, ROCKIVA_PROBE_MAINPATH) &&
@@ -656,7 +901,8 @@ static int query_capabilities(int fd)
 	device_caps = capability.capabilities;
 	if (capability.capabilities & V4L2_CAP_DEVICE_CAPS)
 		device_caps = capability.device_caps;
-	printf("querycap driver=%s card=%s bus=%s version=0x%08x "
+	log_printf(PROBE_OUTPUT_SUMMARY,
+	       "querycap driver=%s card=%s bus=%s version=0x%08x "
 	       "capabilities=0x%08x device_caps=0x%08x\n", capability.driver,
 	       capability.card, capability.bus_info, capability.version,
 	       capability.capabilities, device_caps);
@@ -677,7 +923,8 @@ static int get_current_format(int fd, struct v4l2_format *format)
 	format->type = V4L2_CAPTURE_TYPE;
 	if (ioctl_checked(fd, VIDIOC_G_FMT, format, "VIDIOC_G_FMT") != 0)
 		return -1;
-	printf("format_before width=%u height=%u fourcc=0x%08x field=%u planes=%u\n",
+	log_printf(PROBE_OUTPUT_SUMMARY,
+	       "format_before width=%u height=%u fourcc=0x%08x field=%u planes=%u\n",
 	       format->fmt.pix_mp.width, format->fmt.pix_mp.height,
 	       format->fmt.pix_mp.pixelformat, format->fmt.pix_mp.field,
 	       format->fmt.pix_mp.num_planes);
@@ -723,7 +970,8 @@ static int negotiate_format(int fd, const struct probe_options *options,
 	fourcc_string(format->fmt.pix_mp.pixelformat, actual_fourcc);
 	is_nv12 = format->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12 ||
 		format->fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12M;
-	printf("format_requested=%ux%u NV12 negotiated=%ux%u fourcc=%s "
+	log_printf(PROBE_OUTPUT_SUMMARY,
+	       "format_requested=%ux%u NV12 negotiated=%ux%u fourcc=%s "
 	       "field=%u physical_planes=%u flags=0x%08x\n", options->width,
 	       options->height, format->fmt.pix_mp.width, format->fmt.pix_mp.height,
 	       actual_fourcc, format->fmt.pix_mp.field,
@@ -770,7 +1018,8 @@ static int negotiate_format(int fd, const struct probe_options *options,
 	layout->wstride = (uint16_t)plane->bytesperline;
 	layout->hstride = (uint16_t)hstride;
 	layout->sizeimage = plane->sizeimage;
-	printf("layout width=%u height=%u wstride=%u hstride=%u sizeimage=%u "
+	log_printf(PROBE_OUTPUT_SUMMARY,
+	       "layout width=%u height=%u wstride=%u hstride=%u sizeimage=%u "
 	       "single_fd_candidate=1\n", layout->width, layout->height,
 	       layout->wstride, layout->hstride, layout->sizeimage);
 	return 0;
@@ -803,7 +1052,8 @@ static int request_buffers(int fd, unsigned int requested,
 		*granted = 0;
 		return -1;
 	}
-	printf("buffers requested=%u granted=%u memory=MMAP\n", requested,
+	log_printf(PROBE_OUTPUT_SUMMARY,
+	       "buffers requested=%u granted=%u memory=MMAP\n", requested,
 	       *granted);
 	return 0;
 }
@@ -847,7 +1097,8 @@ static int query_and_prepare_buffer(int fd, unsigned int index,
 			saved_errno, strerror(saved_errno));
 		return -1;
 	}
-	printf("mmap buffer=%u length=%u offset=0x%08x addr=%p\n", index,
+	log_printf(PROBE_OUTPUT_SUMMARY,
+	       "mmap buffer=%u length=%u offset=0x%08x addr=%p\n", index,
 	       plane[0].length, plane[0].m.mem_offset, capture->map_addr);
 	memset(&export_buffer, 0, sizeof(export_buffer));
 	export_buffer.type = V4L2_CAPTURE_TYPE;
@@ -867,7 +1118,8 @@ static int query_and_prepare_buffer(int fd, unsigned int index,
 		errno = saved_errno;
 		return -1;
 	}
-	printf("export buffer=%u plane=0 fd=%d valid=1 mode=0%o retained=1\n",
+	log_printf(PROBE_OUTPUT_SUMMARY,
+	       "export buffer=%u plane=0 fd=%d valid=1 mode=0%o retained=1\n",
 	       index, capture->export_fd, status.st_mode & 07777);
 	return 0;
 }
@@ -910,16 +1162,22 @@ static int dqbuf_capture(int fd, unsigned int expected_planes,
 static int stream_on(int fd)
 {
 	enum v4l2_buf_type type = V4L2_CAPTURE_TYPE;
+	int result;
 
-	return ioctl_checked(fd, VIDIOC_STREAMON, &type, "VIDIOC_STREAMON");
+	result = ioctl_checked(fd, VIDIOC_STREAMON, &type, "VIDIOC_STREAMON");
+	if (result == 0)
+		log_printf(PROBE_OUTPUT_SUMMARY, "stream_on=ok\n");
+	return result;
 }
 
 static int stream_off(int fd, int stream_started)
 {
 	enum v4l2_buf_type type = V4L2_CAPTURE_TYPE;
 
-	if (ioctl_checked(fd, VIDIOC_STREAMOFF, &type, "VIDIOC_STREAMOFF") == 0)
+	if (ioctl_checked(fd, VIDIOC_STREAMOFF, &type, "VIDIOC_STREAMOFF") == 0) {
+		log_printf(PROBE_OUTPUT_SUMMARY, "stream_off=ok\n");
 		return 0;
+	}
 	if (!stream_started && errno == EINVAL) {
 		fprintf(stderr, "VIDIOC_STREAMOFF returned EINVAL before STREAMON; "
 			"queue is already stopped\n");
@@ -988,7 +1246,8 @@ static int restore_format(int fd, const struct v4l2_format *original)
 		fprintf(stderr, "VIDIOC_S_FMT(restore) did not retain original format\n");
 		return -1;
 	}
-	printf("format_restore=ok width=%u height=%u fourcc=0x%08x field=%u "
+	log_printf(PROBE_OUTPUT_SUMMARY,
+	       "format_restore=ok width=%u height=%u fourcc=0x%08x field=%u "
 	       "planes=%u\n", format.fmt.pix_mp.width, format.fmt.pix_mp.height,
 	       format.fmt.pix_mp.pixelformat, format.fmt.pix_mp.field,
 	       format.fmt.pix_mp.num_planes);
@@ -1012,7 +1271,8 @@ static int requeue_released_buffers(int fd, struct probe_state *state)
 			continue;
 		}
 		record = find_frame_locked(state, capture->owner_frame_id);
-		if (!record || !record->release_valid || record->requeued) {
+		if (!record || !record->detection_completed || !record->release_valid ||
+		    record->requeued) {
 			pthread_mutex_unlock(&state->metrics_lock);
 			continue;
 		}
@@ -1039,7 +1299,8 @@ static int requeue_released_buffers(int fd, struct probe_state *state)
 		state->qbufs++;
 		signal_callbacks_locked(state);
 		pthread_mutex_unlock(&state->metrics_lock);
-		printf("requeue buffer=%u frame_id=%" PRIu32 " fd=%d\n", i, frame_id,
+		log_printf(PROBE_OUTPUT_DETAIL,
+		       "requeue buffer=%u frame_id=%" PRIu32 " fd=%d\n", i, frame_id,
 		       capture->export_fd);
 	}
 	return result;
@@ -1073,7 +1334,8 @@ static int has_requeueable_buffer_locked(struct probe_state *state)
 		    capture->owner_frame_id == 0)
 			continue;
 		record = find_frame_locked(state, capture->owner_frame_id);
-		if (record && record->release_valid && !record->requeued)
+		if (record && record->detection_completed && record->release_valid &&
+		    !record->requeued)
 			return 1;
 	}
 	return 0;
@@ -1090,6 +1352,10 @@ static int wait_for_released_buffer(struct probe_state *state, int timeout_ms)
 	}
 	pthread_mutex_lock(&state->metrics_lock);
 	for (;;) {
+		if (stop_requested) {
+			pthread_mutex_unlock(&state->metrics_lock);
+			return 2;
+		}
 		if (has_requeueable_buffer_locked(state)) {
 			pthread_mutex_unlock(&state->metrics_lock);
 			return 0;
@@ -1101,6 +1367,10 @@ static int wait_for_released_buffer(struct probe_state *state, int timeout_ms)
 		}
 		wait_result = pthread_cond_timedwait(&state->callbacks_cond,
 							    &state->metrics_lock, &deadline);
+		if (stop_requested) {
+			pthread_mutex_unlock(&state->metrics_lock);
+			return 2;
+		}
 		if (wait_result == ETIMEDOUT) {
 			fprintf(stderr, "release wait timeout: no requeueable capture buffer\n");
 			pthread_mutex_unlock(&state->metrics_lock);
@@ -1122,9 +1392,13 @@ static int wait_for_capture_event(int fd, int timeout_ms)
 	memset(&poll_fd, 0, sizeof(poll_fd));
 	poll_fd.fd = fd;
 	poll_fd.events = POLLIN | POLLPRI;
+	if (stop_requested)
+		return 2;
 	do {
 		result = poll(&poll_fd, 1, timeout_ms);
-	} while (result < 0 && errno == EINTR);
+	} while (result < 0 && errno == EINTR && !stop_requested);
+	if (stop_requested)
+		return 2;
 	if (result < 0) {
 		int saved_errno = errno;
 
@@ -1140,6 +1414,63 @@ static int wait_for_capture_event(int fd, int timeout_ms)
 		return -1;
 	}
 	return 0;
+}
+
+static uint64_t count_inflight_locked(const struct probe_state *state)
+{
+	unsigned int i;
+	uint64_t count = 0;
+
+	for (i = 0; i < state->buffer_count; i++) {
+		if (state->buffers[i].owner_frame_id != 0)
+			count++;
+	}
+	return count;
+}
+
+static void print_periodic_summary(struct probe_state *state,
+					   unsigned int interval_ms)
+{
+	pthread_mutex_lock(&state->metrics_lock);
+	log_printf(PROBE_OUTPUT_SUMMARY,
+	       "summary periodic=1 interval_ms=%u captures=%" PRIu64
+	       " pushed=%" PRIu64 " accepted=%" PRIu64
+	       " detected=%" PRIu64 " released=%" PRIu64
+	       " in_flight=%" PRIu64 " person=%" PRIu64
+	       " tracking=%" PRIu64 " capture_errors=%" PRIu64
+	       " callback_errors=%" PRIu64 "\n", interval_ms, state->captures,
+	       state->pushed, state->accepted_frames, state->detections,
+	       state->released_frames, count_inflight_locked(state),
+	       state->person_observations, state->person_tracking_observations,
+	       state->capture_errors,
+	       state->detection_errors + state->detection_frame_errors +
+	       state->detection_unmatched + state->detection_duplicates +
+	       state->detection_object_overflows +
+	       state->release_unmatched + state->release_duplicates +
+	       state->release_mismatches + state->release_invalid_callbacks +
+	       state->channel_mismatches);
+	pthread_mutex_unlock(&state->metrics_lock);
+}
+
+static void maybe_report_summary(struct probe_state *state,
+					 unsigned int interval_ms,
+					 uint64_t *next_report_ns)
+{
+	uint64_t now;
+	uint64_t interval_ns;
+
+	if (interval_ms == 0)
+		return;
+	interval_ns = (uint64_t)interval_ms * UINT64_C(1000000);
+	now = monotonic_ns();
+	if (now == 0)
+		return;
+	if (*next_report_ns == 0)
+		*next_report_ns = now + interval_ns;
+	if (now < *next_report_ns)
+		return;
+	print_periodic_summary(state, interval_ms);
+	*next_report_ns = now + interval_ns;
 }
 
 static enum frame_state mark_push_failure_locked(struct probe_state *state,
@@ -1165,21 +1496,24 @@ static int wait_finish(RockIvaHandle handle, int timeout_ms, const char *label)
 	RockIvaRetCode ret = ROCKIVA_WaitFinish(handle, -1, timeout_ms);
 
 	if (ret == ROCKIVA_RET_SUCCESS) {
-		printf("%s ret=%d status=success\n", label, ret);
+	log_printf(PROBE_OUTPUT_SUMMARY, "%s ret=%d status=success\n", label, ret);
 		return 0;
 	}
 	if (ret == ROCKIVA_RET_UNSUPPORTED) {
-		printf("%s ret=%d status=unsupported capability fallback\n", label, ret);
+		log_printf(PROBE_OUTPUT_SUMMARY,
+		       "%s ret=%d status=unsupported capability fallback\n", label,
+		       ret);
 		return 1;
 	}
-	printf("%s ret=%d status=failure\n", label, ret);
+	fprintf(stderr, "%s ret=%d status=failure\n", label, ret);
 	return -1;
 }
 
 static int drain_callbacks(struct probe_state *state, int timeout_ms,
 				   const char *label)
 {
-	printf("%s: bounded callback completion fallback\n", label);
+	log_printf(PROBE_OUTPUT_SUMMARY,
+	       "%s: bounded callback completion fallback\n", label);
 	return wait_for_callback_completion(state, timeout_ms);
 }
 
@@ -1199,8 +1533,9 @@ int main(int argc, char **argv)
 	char version[MAX_VERSION] = {0};
 	unsigned int buffer_count = 0;
 	unsigned int buffer;
-	unsigned int captured = 0;
+	uint64_t captured = 0;
 	uint32_t expected_sequence = 0;
+	uint64_t next_report_ns = 0;
 	int parse_result;
 	int metrics_lock_initialized = 0;
 	int callbacks_cond_initialized = 0;
@@ -1220,9 +1555,16 @@ int main(int argc, char **argv)
 	int result = 1;
 	pthread_condattr_t cond_attr;
 
+	(void)setvbuf(stdout, NULL, _IOLBF, 0);
 	parse_result = parse_options(argc, argv, &options);
 	if (parse_result != 0)
 		return parse_result > 0 ? 0 : 2;
+	configured_log_level = options.log_level;
+	if (install_stop_handlers() != 0) {
+		fprintf(stderr, "cannot install SIGINT/SIGTERM handlers: %s\n",
+			strerror(errno));
+		return 2;
+	}
 	memset(&state, 0, sizeof(state));
 	if (pthread_mutex_init(&state.metrics_lock, NULL) != 0) {
 		fprintf(stderr, "cannot initialize metrics lock\n");
@@ -1245,24 +1587,15 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 	state.channel_id = options.channel_id;
-	state.frame_count = (size_t)options.frames + 1U;
-	if (state.frame_count <= options.frames ||
-	    state.frame_count > SIZE_MAX / sizeof(*state.frames)) {
-		fprintf(stderr, "frame table size overflow\n");
-		operation_failed = 1;
-		goto cleanup;
-	}
-	state.frames = calloc(state.frame_count, sizeof(*state.frames));
-	if (!state.frames) {
-		fprintf(stderr, "cannot allocate frame table\n");
-		operation_failed = 1;
-		goto cleanup;
-	}
-	printf("probe mode=v4l2-rockiva device=%s model=%s model_path=%s width=%u "
-	       "height=%u frames=%u requested_buffers=%u channel=%u core_mask=0x%x\n",
+	state.next_frame_id = 1;
+	log_printf(PROBE_OUTPUT_SUMMARY,
+	       "probe mode=v4l2-rockiva device=%s model=%s model_path=%s width=%u "
+	       "height=%u mode=%s frames=%u requested_buffers=%u channel=%u "
+	       "core_mask=0x%x log_level=%s report_interval_ms=%u\n",
 	       options.device, model_name(options.model), options.model_path,
-	       options.width, options.height, options.frames, options.buffers,
-	       options.channel_id, options.core_mask);
+	       options.width, options.height, options.continuous ? "continuous" : "finite",
+	       options.frames, options.buffers, options.channel_id, options.core_mask,
+	       log_level_name(options.log_level), options.report_interval_ms);
 	fd = open(options.device, O_RDWR | O_NONBLOCK | O_CLOEXEC);
 	if (fd < 0) {
 		int saved_errno = errno;
@@ -1310,6 +1643,18 @@ int main(int argc, char **argv)
 		buffers[buffer].export_fd = -1;
 	state.buffers = buffers;
 	state.buffer_count = buffer_count;
+	state.frame_count = buffer_count;
+	if (state.frame_count > SIZE_MAX / sizeof(*state.frames)) {
+		fprintf(stderr, "frame table size overflow\n");
+		operation_failed = 1;
+		goto cleanup;
+	}
+	state.frames = calloc(state.frame_count, sizeof(*state.frames));
+	if (!state.frames) {
+		fprintf(stderr, "cannot allocate fixed frame slot table\n");
+		operation_failed = 1;
+		goto cleanup;
+	}
 	for (buffer = 0; buffer < buffer_count; buffer++) {
 		if (query_and_prepare_buffer(fd, buffer, &buffers[buffer], &layout) != 0) {
 			operation_failed = 1;
@@ -1338,7 +1683,7 @@ int main(int argc, char **argv)
 	memset(&det_params, 0, sizeof(det_params));
 	det_params.detObjectType = ROCKIVA_OBJECT_TYPE_BITMASK(ROCKIVA_OBJECT_TYPE_PERSON);
 	ret = ROCKIVA_GetVersion(MAX_VERSION, version);
-	printf("rockiva version ret=%d value=%s\n", ret,
+	log_printf(PROBE_OUTPUT_SUMMARY, "rockiva version ret=%d value=%s\n", ret,
 	       version[0] ? version : "(unavailable)");
 	if (ret != ROCKIVA_RET_SUCCESS) {
 		operation_failed = 1;
@@ -1380,22 +1725,31 @@ int main(int argc, char **argv)
 		goto sdk_cleanup;
 	}
 	stream_started = 1;
-	while (captured < options.frames) {
+	next_report_ns = monotonic_ns();
+	if (next_report_ns != 0 && options.report_interval_ms != 0)
+		next_report_ns += (uint64_t)options.report_interval_ms * UINT64_C(1000000);
+	while (!stop_requested &&
+	       (options.continuous || captured < options.frames)) {
 		struct v4l2_buffer dq_buffer;
 		struct v4l2_plane dq_planes[VIDEO_MAX_PLANES];
 		struct capture_buffer *capture;
 		struct probe_frame *record;
 		RockIvaImage image;
-		uint32_t frame_id = captured + 1U;
+		uint32_t frame_id;
 		int poll_result;
 		int dq_result;
+		int release_wait_result;
 
 		if (requeue_released_buffers(fd, &state) != 0) {
 			operation_failed = 1;
 			break;
 		}
 		if (!has_queued_capture(&state)) {
-			if (wait_for_released_buffer(&state, options.timeout_ms) != 0 ||
+			release_wait_result = wait_for_released_buffer(&state,
+								 options.timeout_ms);
+			if (release_wait_result == 2 && stop_requested)
+				break;
+			if (release_wait_result != 0 ||
 			    requeue_released_buffers(fd, &state) != 0) {
 				operation_failed = 1;
 				break;
@@ -1403,9 +1757,13 @@ int main(int argc, char **argv)
 		}
 		poll_result = wait_for_capture_event(fd, options.timeout_ms);
 		if (poll_result != 0) {
-			if (poll_result > 0)
-				fprintf(stderr, "capture poll timeout before frame=%" PRIu32 "\n",
-					frame_id);
+			if (poll_result == 1)
+				fprintf(stderr, "capture poll timeout before capture=%" PRIu64 "\n",
+					captured + 1U);
+			if (poll_result == 2)
+				log_printf(PROBE_OUTPUT_EVENT, "stop requested during capture wait\n");
+			if (poll_result == 2)
+				break;
 			operation_failed = 1;
 			break;
 		}
@@ -1447,20 +1805,29 @@ int main(int argc, char **argv)
 			operation_failed = 1;
 			break;
 		}
+		frame_id = next_frame_id_locked(&state);
+		if (frame_id == 0) {
+			state.capture_errors++;
+			pthread_mutex_unlock(&state.metrics_lock);
+			fprintf(stderr, "cannot allocate a free bounded frame ID\n");
+			operation_failed = 1;
+			break;
+		}
 		capture->queued = 0;
 		capture->owner_frame_id = frame_id;
-		record = &state.frames[frame_id];
+		record = &state.frames[dq_buffer.index];
+		memset(record, 0, sizeof(*record));
 		record->frame_id = frame_id;
 		record->buffer_index = dq_buffer.index;
 		record->sequence = dq_buffer.sequence;
 		record->bytesused = dq_planes[0].bytesused;
 		record->submitted_ns = monotonic_ns();
 		record->state = FRAME_PENDING;
-	state.captures++;
-	if (captured != 0 && dq_buffer.sequence != expected_sequence + 1U)
-		state.sequence_errors++;
-	expected_sequence = dq_buffer.sequence;
-	pthread_mutex_unlock(&state.metrics_lock);
+		state.captures++;
+		if (captured != 0 && dq_buffer.sequence != expected_sequence + 1U)
+			state.sequence_errors++;
+		expected_sequence = dq_buffer.sequence;
+		pthread_mutex_unlock(&state.metrics_lock);
 	memset(&image, 0, sizeof(image));
 	image.frameId = frame_id;
 	image.channelId = options.channel_id;
@@ -1482,7 +1849,8 @@ int main(int argc, char **argv)
 	}
 	signal_callbacks_locked(&state);
 	pthread_mutex_unlock(&state.metrics_lock);
-	printf("dq frame_id=%" PRIu32 " buffer=%u sequence=%" PRIu32
+	log_printf(PROBE_OUTPUT_DETAIL,
+	       "dq frame_id=%" PRIu32 " buffer=%u sequence=%" PRIu32
 	       " bytesused=%u fd=%d push_ret=%d\n", frame_id, dq_buffer.index,
 	       dq_buffer.sequence, dq_planes[0].bytesused, capture->export_fd, ret);
 	if (requeue_released_buffers(fd, &state) != 0 || ret != ROCKIVA_RET_SUCCESS) {
@@ -1490,7 +1858,11 @@ int main(int argc, char **argv)
 		break;
 	}
 	captured++;
+		maybe_report_summary(&state, options.report_interval_ms, &next_report_ns);
 	}
+	if (stop_requested)
+		log_printf(PROBE_OUTPUT_EVENT,
+		       "stop requested; beginning bounded SDK callback drain\n");
 
 sdk_cleanup:
 	if (handle_initialized) {
@@ -1516,7 +1888,7 @@ sdk_cleanup:
 		}
 		if (detect_initialized && callback_complete) {
 			ret = ROCKIVA_DETECT_Release(handle);
-			printf("detect_release ret=%d\n", ret);
+			log_printf(PROBE_OUTPUT_SUMMARY, "detect_release ret=%d\n", ret);
 			if (ret != ROCKIVA_RET_SUCCESS)
 				operation_failed = 1;
 		}
@@ -1538,7 +1910,7 @@ sdk_cleanup:
 		}
 		if (final_cleanup_safe) {
 			ret = ROCKIVA_Release(handle);
-			printf("rockiva_release ret=%d\n", ret);
+			log_printf(PROBE_OUTPUT_SUMMARY, "rockiva_release ret=%d\n", ret);
 			if (ret == ROCKIVA_RET_SUCCESS)
 				sdk_released = 1;
 			else
@@ -1573,7 +1945,9 @@ cleanup:
 			"process exit\n");
 	if (metrics_lock_initialized)
 		pthread_mutex_lock(&state.metrics_lock);
-	if (state.captures != options.frames || state.pushed != options.frames ||
+	if ((!options.continuous && state.captures != options.frames) ||
+	    (!options.continuous && state.pushed != options.frames) ||
+	    (options.continuous && state.captures == 0) ||
 	    state.push_failures != 0 || state.capture_errors != 0 ||
 	    state.qbuf_failures != 0 || state.sequence_errors != 0 ||
 	    state.accepted_frames != state.pushed ||
@@ -1584,6 +1958,10 @@ cleanup:
 	    state.release_mismatches != 0 || state.release_invalid_callbacks != 0 ||
 	    state.channel_mismatches != 0)
 		operation_failed = 1;
+	if (options.continuous && state.captures == 0) {
+		fprintf(stderr, "continuous run stopped before first capture\n");
+		operation_failed = 1;
+	}
 	if (state.person_observations < options.min_person_observations) {
 		fprintf(stderr, "person observations below minimum: %" PRIu64 " < %u\n",
 			state.person_observations, options.min_person_observations);
@@ -1599,7 +1977,8 @@ cleanup:
 		result = 1;
 	else
 		result = 0;
-	printf("summary captures=%" PRIu64 " qbufs=%" PRIu64
+	printf("summary captures=%" PRIu64 " mode=%s stop=%s frame_slots=%zu "
+	       "qbufs=%" PRIu64
 	       " qbuf_failures=%" PRIu64 " sequence_errors=%" PRIu64
 	       " capture_errors=%" PRIu64 " accepted=%" PRIu64
 	       " pushed=%" PRIu64 " push_failures=%" PRIu64
@@ -1608,7 +1987,10 @@ cleanup:
 	       " released=%" PRIu64 " release_unmatched=%" PRIu64
 	       " release_duplicates=%" PRIu64 " release_mismatches=%" PRIu64
 	       " person=%" PRIu64 " tracking=%" PRIu64
-	       " fd_lifecycle=%s t1=%s\n", state.captures, state.qbufs,
+	       " fd_lifecycle=%s t1=%s\n", state.captures,
+	       options.continuous ? "continuous" : "finite",
+	       stop_requested ? "signal" : (options.continuous ? "error" : "limit"),
+	       state.frame_count, state.qbufs,
 	       state.qbuf_failures, state.sequence_errors, state.capture_errors,
 	       state.accepted_frames, state.pushed, state.push_failures,
 	       state.detections, state.detection_errors, state.detection_frame_errors,

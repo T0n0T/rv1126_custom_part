@@ -5,13 +5,14 @@ linked into the production `media_engine` target.
 
 The probe reads tightly packed raw NV12 frames from a file, initializes
 RockIVA in `ROCKIVA_MODE_VIDEO`, enables the pure detection callback, pushes
-the requested number of frames, waits for completion, and prints:
+the requested number of frames (or runs until a stop signal in continuous
+mode), waits for completion, and prints (with a selectable verbosity):
 
 - RockIVA version and selected initialization parameters;
-- each push result and frame ID;
+- each push result and frame ID at the default `all` log level;
 - detection status, object ID, state, score, type, normalized rectangle and
-  callback frame ID;
-- person observations split by `FIRST`, `TRACKING`, `LOST` and `DISPEAR`;
+  callback frame ID at the default `all` log level;
+- person observations split by `FIRST`, `TRACKING`, `LOST` and `DISAPPEAR`;
 - frame-release callback channel, count, frame IDs and memory handles;
 - final push/detection/release counts with per-callback latency statistics and
   ownership/channel consistency counters.
@@ -42,11 +43,12 @@ probe keeps its pre-open path guard because `v4l2src` owns the capture open;
 it remains an independent experiment and must be run only on the unused
 selfpath.
 
-By default a successful run also requires at least one person observation and
-at least one person in `ROCKIVA_OBJECT_STATE_TRACKING`. `MIN_PERSON` and
-`MIN_TRACKING` may raise those thresholds. Setting either threshold to zero is
-accepted only as an explicit empty-scene/lifecycle diagnostic and cannot
-satisfy the T1 person and tracking gate.
+The file-input runner sets `MIN_PERSON=1` and `MIN_TRACKING=1` by default. The
+native V4L2 runner deliberately defaults both thresholds to zero so that an
+empty-scene lifecycle check is possible; set both to `1` when checking a live
+person. `MIN_PERSON` and `MIN_TRACKING` may raise the thresholds. Setting either
+threshold to zero is accepted only as an explicit empty-scene/lifecycle
+diagnostic and cannot satisfy the T1 person and tracking gate.
 
 This threshold gate proves only that person and tracking observations were
 reported. It does not prove that `FIRST` and `TRACKING` belong to the same
@@ -194,15 +196,49 @@ DEVICE=/dev/video25 MODEL_PATH=/oem/usr/lib WIDTH=640 HEIGHT=360 FRAMES=30 \
   ./run_v4l2_rockiva_probe.sh
 ```
 
-`BUFFERS`, `MODEL`, `CHANNEL`, `CORE_MASK`, `TIMEOUT_MS`, `MIN_PERSON` and
-`MIN_TRACKING` are optional runner variables. The runner defaults the two
-observation thresholds to zero for an explicit empty-scene/lifecycle
-diagnostic; zero thresholds do not prove person detection or tracking. The
-`/dev/video24` production mainpath is rejected unless `ALLOW_MAINPATH=1` is
-set for an explicitly approved experiment. A successful build, capability
-probe or native process does not establish T1 detection quality, stable
-`objId` tracking, DMA-BUF compatibility with the production pipeline, or
-main-video isolation; record those only from representative board runs.
+For a long-running capture, set `CONTINUOUS=1` and stop it with `SIGINT` or
+`SIGTERM`. Continuous mode does not require or forward `FRAMES`, and it always
+rejects `/dev/video24`, including path aliases. Frame IDs are still supplied to
+RockIVA for callback correlation, but the probe keeps only one fixed record per
+granted V4L2 buffer slot; it never grows a table with the run length. On stop,
+capture stops and SDK callbacks are drained with the existing per-run timeout
+before buffers, mappings, retained DMA-BUF fds and the original format are
+cleaned up. If callback completion cannot be proven, teardown remains deferred
+until process exit as in the finite probe.
+
+For the board runner, a low-noise interactive session is:
+
+```sh
+DEVICE=/dev/video25 MODEL_PATH=/oem/usr/lib ROCKIVA_LIB_DIR=/oem/usr/lib \
+  WIDTH=640 HEIGHT=360 CONTINUOUS=1 LOG_LEVEL=events \
+  REPORT_INTERVAL_MS=1000 /tmp/run_v4l2_rockiva_probe.sh
+```
+
+Press `Ctrl-C` once to request a bounded, orderly shutdown. Use
+`LOG_LEVEL=summary` for periodic counters without person state transitions, or
+`LOG_LEVEL=quiet` when only errors and the final summary are needed.
+
+`BUFFERS`, `MODEL`, `CHANNEL`, `CORE_MASK`, `TIMEOUT_MS`, `LOG_LEVEL`,
+`REPORT_INTERVAL_MS`, `MIN_PERSON` and `MIN_TRACKING` are optional runner
+variables. `LOG_LEVEL` accepts `quiet`, `summary`, `events` or `all` (the
+default). `all` retains the original per-frame callback output. `events` keeps
+setup/cleanup and periodic summaries plus person state transitions with target
+details; `summary` suppresses per-frame and unchanged-target output; `quiet`
+emits errors and the final summary only. `REPORT_INTERVAL_MS` controls periodic
+summary output and defaults to 5000 ms; set it to `0` to disable periodic
+reports. stdout is line-buffered so reports remain visible during a continuous
+run. Object states are printed with readable names (`FIRST`, `TRACKING`, `LOST`,
+`DISAPPEAR`, and `NONE`) as well as their numeric SDK value.
+
+The V4L2 runner defaults `MIN_PERSON=0` and `MIN_TRACKING=0` for an explicit
+empty-scene/lifecycle diagnostic; set both to `1` when checking a live person.
+Zero thresholds do not prove person detection or tracking. The `/dev/video24`
+production mainpath is rejected unless `ALLOW_MAINPATH=1` is set for an
+explicitly approved finite experiment; continuous mode rejects that override.
+A successful build, capability probe or native process does not establish T1
+detection quality, stable `objId` tracking, DMA-BUF compatibility with the
+production pipeline, or main-video isolation; record those only from
+representative board runs.
 
 ## Camera DMA-BUF probe
 

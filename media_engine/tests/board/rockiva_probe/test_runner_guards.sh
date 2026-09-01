@@ -104,6 +104,11 @@ expect_failure_contains v4l2-rockiva-invalid-mainpath 'ALLOW_MAINPATH must be 0 
 	env -i PATH="$PATH_VALUE" DEVICE=/tmp/selfpath WIDTH=640 HEIGHT=360 \
 	FRAMES=1 MODEL_PATH=/tmp/model ALLOW_MAINPATH=2 \
 	sh "$ROCKIVA_DIR/run_v4l2_rockiva_probe.sh"
+expect_failure_contains v4l2-rockiva-continuous-mainpath-forbidden \
+	'continuous mode cannot enable ALLOW_MAINPATH' \
+	env -i PATH="$PATH_VALUE" DEVICE=/tmp/selfpath MODEL_PATH=/tmp/model \
+	WIDTH=640 HEIGHT=360 CONTINUOUS=1 ALLOW_MAINPATH=1 \
+	sh "$ROCKIVA_DIR/run_v4l2_rockiva_probe.sh"
 expect_failure_contains dmabuf-invalid-mainpath 'ALLOW_MAINPATH must be 0 or 1' \
 	env -i PATH="$PATH_VALUE" DEVICE=/tmp/selfpath WIDTH=640 HEIGHT=360 \
 	FRAMES=1 MODEL_PATH=/tmp/model FPS=10 ALLOW_MAINPATH=2 \
@@ -124,6 +129,20 @@ env -i PATH="$PATH_VALUE" TRACE_FILE="$ROCKIVA_TRACE" \
 expect_contains v4l2-rockiva-safe-device 'arg=/tmp/selfpath' "$ROCKIVA_TRACE"
 expect_contains v4l2-rockiva-thresholds 'arg=1' "$ROCKIVA_TRACE"
 expect_contains v4l2-rockiva-library-path 'LD_LIBRARY_PATH=/opt/rockiva' "$ROCKIVA_TRACE"
+expect_contains v4l2-rockiva-finite-frame-limit 'arg=--frames' "$ROCKIVA_TRACE"
+
+ROCKIVA_CONTINUOUS_TRACE=$TMP_DIR/v4l2-rockiva-continuous.trace
+env -i PATH="$PATH_VALUE" TRACE_FILE="$ROCKIVA_CONTINUOUS_TRACE" \
+	DEVICE=/tmp/selfpath MODEL_PATH=/tmp/model ROCKIVA_LIB_DIR=/opt/rockiva \
+	WIDTH=640 HEIGHT=360 FRAMES=999 CONTINUOUS=1 LOG_LEVEL=events \
+	REPORT_INTERVAL_MS=1200 sh "$ROCKIVA_DIR/run_v4l2_rockiva_probe.sh"
+expect_contains v4l2-rockiva-continuous-mode 'arg=--continuous' \
+	"$ROCKIVA_CONTINUOUS_TRACE"
+expect_absent v4l2-rockiva-continuous-no-frame-limit 'arg=--frames' \
+	"$ROCKIVA_CONTINUOUS_TRACE"
+expect_contains v4l2-rockiva-log-level 'arg=events' "$ROCKIVA_CONTINUOUS_TRACE"
+expect_contains v4l2-rockiva-report-interval 'arg=1200' \
+	"$ROCKIVA_CONTINUOUS_TRACE"
 
 DMABUF_TRACE=$TMP_DIR/dmabuf.trace
 env -i PATH="$PATH_VALUE" TRACE_FILE="$DMABUF_TRACE" \
@@ -170,5 +189,11 @@ for source in v4l2_expbuf_probe.c v4l2_rockiva_probe.c; do
 	expect_contains "$source-opened-device-identity" \
 		'rockiva_probe_fd_is_mainpath(fd' "$SCRIPT_DIR/$source"
 done
+
+expect_contains v4l2-rockiva-fixed-frame-slots \
+	'state.frame_count = buffer_count' "$SCRIPT_DIR/v4l2_rockiva_probe.c"
+expect_absent v4l2-rockiva-frame-table-not-sized-by-limit \
+	'state.frame_count = (size_t)options.frames' \
+	"$SCRIPT_DIR/v4l2_rockiva_probe.c"
 
 printf '%s\n' '[PASS] runner guard checks complete without opening a V4L2 device'
