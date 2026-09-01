@@ -31,7 +31,7 @@ GST_LDFLAGS := -L$(MEDIA_OUT)/lib \
 GST_LDLIBS := -lgstapp-1.0 -lgstvideo-1.0 -lgstallocators-1.0 \
 	-lgstbase-1.0 -lgstreamer-1.0 -lgobject-2.0 -lglib-2.0
 
-.PHONY: all clean info test test-runners test-mainpath-guard
+.PHONY: all clean info test test-runners test-log-analyzer test-mainpath-guard
 
 all: $(TARGET) $(DMABUF_TARGET) $(V4L2_TARGET) $(V4L2_ROCKIVA_TARGET)
 
@@ -54,12 +54,15 @@ $(HOST_TARGET): $(HOST_SRC)
 $(HOST_GUARD_TARGET): $(HOST_GUARD_SRC) mainpath_guard.h
 	$(HOST_CC) $(HOST_CFLAGS) -o $@ $(HOST_GUARD_SRC)
 
-test: $(HOST_TARGET) $(HOST_GUARD_TARGET) test-runners
+test: $(HOST_TARGET) $(HOST_GUARD_TARGET) test-runners test-log-analyzer
 	./test_probe.sh ./$(HOST_TARGET)
 	./$(HOST_GUARD_TARGET)
 
 test-runners:
 	sh ./test_runner_guards.sh
+
+test-log-analyzer:
+	sh ./test_t1_log_analyzer.sh
 
 test-mainpath-guard: $(HOST_GUARD_TARGET)
 	./$(HOST_GUARD_TARGET)

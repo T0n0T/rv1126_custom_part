@@ -456,15 +456,18 @@ static void print_object(const RockIvaObjectInfo *object)
 }
 
 static void print_person_event(const RockIvaObjectInfo *object,
+				       uint32_t callback_frame_id,
 				       int previous_state)
 {
 	log_printf(PROBE_OUTPUT_EVENT,
 	       "person_event obj_id=%" PRIu32 " transition=%s->%s state=%s(%d)"
-	       " score=%" PRIu32 " frame_id=%" PRIu32
+	       " score=%" PRIu32 " callback_frame_id=%" PRIu32
+	       " object_frame_id=%" PRIu32
 	       " rect=%d,%d-%d,%d timestamp=%lu\n", object->objId,
 	       object_state_name(previous_state), object_state_name(object->state),
 	       object_state_name(object->state), object->state, object->score,
-	       object->frameId, object->rect.topLeft.x, object->rect.topLeft.y,
+	       callback_frame_id, object->frameId, object->rect.topLeft.x,
+	       object->rect.topLeft.y,
 	       object->rect.bottomRight.x, object->rect.bottomRight.y,
 	       object->timestamp);
 }
@@ -521,7 +524,8 @@ static void detect_callback(const RockIvaDetectResult *result,
 		state_changed = update_person_state_locked(state, &result->objInfo[i],
 							    &previous_state);
 		if (state_changed)
-			print_person_event(&result->objInfo[i], previous_state);
+			print_person_event(&result->objInfo[i], result->frameId,
+					   previous_state);
 		print_object(&result->objInfo[i]);
 	}
 	signal_callbacks_locked(state);

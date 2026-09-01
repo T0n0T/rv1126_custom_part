@@ -195,5 +195,12 @@ expect_contains v4l2-rockiva-fixed-frame-slots \
 expect_absent v4l2-rockiva-frame-table-not-sized-by-limit \
 	'state.frame_count = (size_t)options.frames' \
 	"$SCRIPT_DIR/v4l2_rockiva_probe.c"
+expect_contains v4l2-rockiva-person-event-callback-frame-id \
+	'uint32_t callback_frame_id' "$SCRIPT_DIR/v4l2_rockiva_probe.c"
+expect_contains v4l2-rockiva-person-event-object-frame-id \
+	'object_frame_id=%" PRIu32' "$SCRIPT_DIR/v4l2_rockiva_probe.c"
+expect_contains v4l2-rockiva-person-event-result-frame-id \
+	'print_person_event(&result->objInfo[i], result->frameId' \
+	"$SCRIPT_DIR/v4l2_rockiva_probe.c"
 
 printf '%s\n' '[PASS] runner guard checks complete without opening a V4L2 device'

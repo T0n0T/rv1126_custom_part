@@ -187,11 +187,56 @@ PFP、`640x360`、60 帧、`FPS=10`、`coreMask=0x0`、`MIN_PERSON=1`、
 主编码并发或精度标注验收。`objId` 数量和 `person observations` 均不得直接转化为
 人流唯一计数。
 
+## 2026-09-01 原生 V4L2->RockIVA CLS8 900 帧模型对比
+
+同日继续在隔离节点 `/dev/video25` 上运行 CLS8，作为与 PFP 的模型对比，不属于
+产品路径。运行上下文为 `640x360`、V4L2 `MMAP + VIDIOC_EXPBUF`、4 个 buffer、
+`channel=0`、`coreMask=0x0`、有限模式 900 帧；探针日志级别为 `events`，因此没有
+逐帧时延行。对应环境和入口为：
+
+```sh
+MODEL=cls8 DEVICE=/dev/video25 MODEL_PATH=/oem/usr/lib \
+ROCKIVA_LIB_DIR=/oem/usr/lib WIDTH=640 HEIGHT=360 FRAMES=900 \
+LOG_LEVEL=events REPORT_INTERVAL_MS=1000 MIN_PERSON=1 MIN_TRACKING=1 \
+/tmp/run_v4l2_rockiva_probe.sh
+```
+
+原始日志为 `/tmp/t1-events-cls8.log`，SHA-256 为
+`95317ae72ff0c1a741cb0ff108b4c4c572a4f132462d758ff2610f05c0514f92`。最终摘要和收尾
+证据如下：
+
+| 项目 | 结果 |
+| --- | --- |
+| captures/pushed/detected/released | `900/900/900/900` |
+| sequence/capture/push/detection/release 错误 | `53/0/0/0/0`；`qbuf_failures=0` |
+| callback completion | `accepted=900`、`detection_completed=900`、`released=900` |
+| person/tracking observations | `725/630`（观察次数，不是人数） |
+| event `obj_id` 数量 | `15`：`2,3,7,9,10,11,14,18,19,22,23,27,28,30,34` |
+| 检测/释放时延 | 本次 `events` 日志未记录逐帧 latency，未据此宣称数值或与 PFP 做时延比较 |
+| SDK/采集收尾 | `ROCKIVA_WaitFinish=-5` 走有界 callback fallback；`DETECT_Release=0`、`ROCKIVA_Release=0`、`stream_off=ok`、格式恢复成功 |
+| 直接退出码 | 未在本轮 shell 记录中单独捕获；最终摘要为 `t1=not_claimed`，按探针退出判定应视为非零，不能把 `tee/adb` 的传输状态当作探针退出码 |
+
+`sequence_errors=53` 是探针观察到的 V4L2 sequence 不连续次数，不能直接等同于
+丢失帧数量；它与采集端在推理未及时消费时发生 overrun/drop 的现象一致。CLS8
+本轮推理更重是一个合理的候选原因，但当前 `events` 日志没有采样率、队列深度和
+逐帧 latency，尚不能把全部 sequence gap 归因于模型。与已有 PFP 原生 V4L2 有人
+场景的 `sequence_errors=0` 证据相比，CLS8 本轮的采集连续性较差。
+
+本轮 15 个 `obj_id` 还伴随频繁的 `FIRST`、`LOST`、`TRACKING`、`DISAPPEAR` 重建；
+在现场按单人进出测试理解时，这表现为严重 ID churn 和疑似误检风险。`person=725`
+与 `tracking=630` 仍然只是跨帧观察次数，不能作为 15 人、725 人或任何唯一人流量。
+因此该结果只能作为 CLS8 对比/候选证据：它证明了 callback 和释放闭环，但不能
+解除 T1，也不能支持将 CLS8 固化到生产。PFP 继续保持下一阶段的暂定候选。
+
 ## 当前判定
 
 - PFP 是下一阶段的暂定候选：CPU-NV12 片段、`test1.mp4` 人群压力样本和一轮 60 帧
   有人场景 DMA-BUF 运行均完成回调闭环，且 PFP 的平均回调时延低于 CLS8。样本仍
   不足以形成精度、召回率、ID switch、遮挡恢复或模型发布结论。
+- CLS8 的 900 帧原生 V4L2 对比运行完成 `900/900/900/900` callback 闭环，但出现
+  `sequence_errors=53` 和 15 个事件 `obj_id`；相较已有 PFP 证据，本轮 CLS8 的采集
+  连续性和跟踪稳定性较低。它仍是对比结果，不解除 T1；由于未输出逐帧 latency，
+  不据此补写 CLS8 的时延结论。
 - `coreMask=0x0` 与 `0x4` 都可工作；当前样本不足以固化核心掩码，生产配置不得
   依据本表硬编码。
 - CPU `dataAddr` 的帧所有权、回调关联和 SDK 收尾已在真板得到正向证据。此前
@@ -205,18 +250,20 @@ PFP、`640x360`、60 帧、`FPS=10`、`coreMask=0x0`、`MIN_PERSON=1`、
 
 ## 未解除的 T1 门禁
 
-1. 多轮有人场景下的 DMA-BUF 检出、`objId/state` 生命周期和稳定性；当前只有一轮
-   60 帧候选证据。
+1. 多轮有人场景下的 DMA-BUF 检出、`objId/state` 生命周期和稳定性；PFP 当前只有一轮
+   60 帧候选证据，CLS8 的 900 帧对比又出现 `sequence_errors=53` 和明显 ID 重建，
+   两者都不足以形成 T1 通过证据。
 2. 当前仅有两次短时隔离停止/重启的 callback 计数证据；流 epoch 切换、停止时的
    异步回调、无泄漏/UAF 和长期重复启停仍未证明。
 3. 与主编码/点播并发时的帧率、丢帧、CPU/NPU、温度和内存预算。
-4. 多场景标注集上的检测精度、ID switch、遮挡恢复和方向计数误差。
+4. 多场景标注集上的检测精度、ID switch、遮挡恢复和方向计数误差；CLS8 本轮的
+   15 个 `obj_id`、`person=725` 和 `tracking=630` 只作为抖动/误检风险信号。
 5. 已有生产 PID/RSS/FD 的只读前后快照；主路径采集 sequence、编码连续性和点播
    回归仍无可复现证据。
 
 完整的本机原始日志保留在
 `/tmp/rockiva-t1-frames.JqRE62/t1-rockiva-*-fallback.log`、
 `/tmp/t1-v4l2-rockiva-restart-20260831-165409.log`、
-`/tmp/t1-v4l2-rockiva-person-60-20260901-091122.log` 和
+`/tmp/t1-v4l2-rockiva-person-60-20260901-091122.log`、`/tmp/t1-events-cls8.log` 和
 `/tmp/t1-board-dmabuf-20260831-164525.log`、`/tmp/test1-board-rockiva-20260901.log`；
 它们是会话证据，不作为固件或仓库发布物。

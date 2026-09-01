@@ -230,6 +230,40 @@ reports. stdout is line-buffered so reports remain visible during a continuous
 run. Object states are printed with readable names (`FIRST`, `TRACKING`, `LOST`,
 `DISAPPEAR`, and `NONE`) as well as their numeric SDK value.
 
+The `callback_frame_id` in each `person_event` line is the enclosing detection
+result's `frameId`, which is also used for callback correlation. The
+per-object `frameId` is emitted separately as `object_frame_id` and may be zero
+on the board.
+
+## Analyze a saved T1 log
+
+`analyze_t1_log.sh` is a host-only POSIX shell/AWK report tool. It does not
+open a V4L2 node, load RockIVA, or change board state. Give it the saved probe
+log, or use `-` to read stdin:
+
+```sh
+./analyze_t1_log.sh /tmp/t1-events-v5.log
+cat /tmp/t1-events-v5.log | ./analyze_t1_log.sh -
+```
+
+The report repeats the final `summary captures=... mode=...` line, extracts the
+capture/push/detect/release and sequence/capture/release error fields, counts
+unique `obj_id` values only from `person_event` lines, and prints transition
+counts, per-ID first/last `callback_frame_id`, event counts, and the longest ID
+span. `person` and `tracking` totals from the final summary are reported as
+observation totals and are never used as unique-person counts. Per-ID
+`observations` counts `object` lines when an `all`-level log contains them; an
+`events`-level log has `observations=not-recorded` because unchanged object
+observations were intentionally not printed.
+
+The analyzer fails if the final summary is absent or if no `person_event` line
+is present. Use `--allow-empty` only for a deliberately empty-scene log; the
+final summary is still required:
+
+```sh
+./analyze_t1_log.sh --allow-empty /tmp/t1-empty.log
+```
+
 The V4L2 runner defaults `MIN_PERSON=0` and `MIN_TRACKING=0` for an explicit
 empty-scene/lifecycle diagnostic; set both to `1` when checking a live person.
 Zero thresholds do not prove person detection or tracking. The `/dev/video24`

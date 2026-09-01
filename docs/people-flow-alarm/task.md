@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送任务分解
 
-状态：T0/T2/T4 已完成；T1 已取得 CPU-NV12、隔离采集 DMA-BUF 生命周期及一轮 60 帧有人场景子证据，但因设备资源达到本轮上限而暂停；T3 仍阻塞于 T1
+状态：T0/T2/T4 已完成；T1 已取得 CPU-NV12、隔离采集 DMA-BUF 生命周期、一轮 60 帧有人场景及一轮 CLS8 900 帧对比子证据，但 CLS8 对比出现 `sequence_errors=53` 和明显 ID 重建，且因设备资源达到本轮上限而暂停；T3 仍阻塞于 T1
 上游规格：`docs/people-flow-alarm/spec.md`
 上游计划：`docs/people-flow-alarm/plan.md`
 本文件作用：记录经确认的 T0-T12 纵向任务、阻塞关系和验收边界
@@ -64,7 +64,7 @@ T10 + T11 -> T12
 
 **Blocked by:** T0 — 基线与回滚开关。
 
-**Status:** in progress（CPU-NV12 有人片段、`test1.mp4` 人群压力样本和一轮 60 帧有人场景 DMA-BUF 候选运行通过；隔离原生 DMA-BUF 生命周期和短时停止/重启边界通过；因设备资源达到本轮上限暂时停止更高占用板端复测；完整流边界和主视频连续性仍待验证）
+**Status:** in progress（CPU-NV12 有人片段、`test1.mp4` 人群压力样本和一轮 60 帧有人场景 DMA-BUF 候选运行通过；隔离原生 DMA-BUF 生命周期和短时停止/重启边界通过；CLS8 900 帧模型对比虽完成 callback 闭环但出现 `sequence_errors=53` 和明显 ID 重建；因设备资源达到本轮上限暂时停止更高占用板端复测；完整流边界和主视频连续性仍待验证）
 
 探针已落地为非产品路径：`media_engine/tests/board/rockiva_probe/`。它提供
 SDK 交叉编译 Makefile、运行脚本、CPU 地址 NV12 输入、DET 回调、帧释放回调、
@@ -89,6 +89,22 @@ CPU 地址压力样本，PFP 探针结果为 `pushed=60`、`detection_callbacks=
 `released_frames=60`、`person=770`、`tracking=425`，直接退出码为 0。该样本用于
 密集人群压力观察，不替代 DMA-BUF 或唯一人数验收。
 
+同日另在 `/dev/video25` 使用 CLS8、`640x360`、`coreMask=0x0`、4 个 V4L2 buffer
+和有限模式 900 帧进行原生 `MMAP + VIDIOC_EXPBUF` 模型对比。运行结果为
+`captures/pushed/detected/released=900/900/900/900`，`capture/push/detection/release`
+错误均为 0，但 `sequence_errors=53`；`person=725`、`tracking=630`，观察到 15 个
+事件 `obj_id`。`ROCKIVA_WaitFinish=-5` 由有界 callback fallback 收尾，
+`DETECT_Release`/`ROCKIVA_Release` 成功；最终摘要为 `t1=not_claimed`，本轮没有
+单独捕获探针直接退出码，不能把 `tee/adb` 的传输状态当作探针退出码。本次 `LOG_LEVEL=events` 未记录逐帧 latency，因此不补写 CLS8
+时延结论。
+
+这只是模型比较结果，不是 T1 完成证据。`sequence_errors=53` 表明 V4L2 sequence
+连续性未通过，不能直接等同于 53 个丢帧；推理较重导致采集 overrun/drop 是合理但
+尚未证实的原因。15 个 `obj_id` 及频繁 `FIRST/LOST/TRACKING/DISAPPEAR` 重建，
+在单人现场语境下构成严重 ID churn/疑似误检风险。`person` 和 `tracking` 是跨帧
+observation 次数，不是人数；相较已有 PFP `sequence_errors=0` 的有人场景候选证据，
+CLS8 本轮观察到的吞吐连续性和跟踪稳定性较低，PFP 仍为暂定候选。
+
 当前暂停不是检测失败。CPU-NV12 已有包含人员的正向检测/跟踪证据，隔离
 `/dev/video25` 已有原生 DMA-BUF capture/push/detect/release、短时停止/重启以及一轮
 60 帧有人场景候选证据；但设备资源已达到本轮上限，现阶段不再执行更高占用板端命令。
@@ -105,8 +121,9 @@ UAF/泄漏、主路径 sequence 和编码连续性仍未验证。另一次 GStre
 在第一个 sample 因内存不是 DMA-BUF 被拒绝，不能与原生 `VIDIOC_EXPBUF` 结果混同。
 
 - [ ] 在候选分辨率和采样率下取得稳定 DMA-BUF person 检出及 `objId/state` 生命周期；
-      2026-09-01 原生 V4L2 60 帧运行已有 `person=58 tracking=50` 的候选证据，
-      但仍需多轮场景和长期稳定性验证。
+      2026-09-01 原生 V4L2 60 帧 PFP 运行已有 `person=58 tracking=50` 的候选证据，
+      但 CLS8 900 帧对比出现 `sequence_errors=53`、15 个 `obj_id` 和频繁 ID 重建，
+      两者仍需多轮场景和长期稳定性验证。
 - [ ] 固化经过测量的模型、结果模式、核心掩码、帧格式和输入方式。
 - [ ] 证明 push、release callback、停止和重启无泄漏、重复释放或悬空引用。
 - [ ] 证明分析分支关闭点播后仍可运行，且启停不影响主视频。

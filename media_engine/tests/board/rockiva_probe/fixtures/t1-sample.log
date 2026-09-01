@@ -1,0 +1,14 @@
+probe mode=v4l2-rockiva device=/dev/video25 model=PFP width=640 height=360 mode=finite frames=24
+summary periodic=1 interval_ms=1000 captures=24 pushed=24 accepted=24 detected=23 released=23 in_flight=1 person=999 tracking=888 capture_errors=0 callback_errors=0
+person_event obj_id=7 transition=NONE->FIRST state=FIRST(1) score=900 callback_frame_id=10 object_frame_id=0 rect=10,20-30,40 timestamp=100
+  object obj_id=7 state=FIRST(1) type=1 score=900 frame_id=0 rect=10,20-30,40 timestamp=100
+person_event obj_id=7 transition=FIRST->TRACKING state=TRACKING(2) score=910 callback_frame_id=12 object_frame_id=0 rect=11,20-31,40 timestamp=120
+  object obj_id=7 state=TRACKING(2) type=1 score=910 frame_id=0 rect=11,20-31,40 timestamp=120
+  object obj_id=7 state=TRACKING(2) type=1 score=915 frame_id=0 rect=12,20-32,40 timestamp=130
+person_event obj_id=9 transition=NONE->FIRST state=FIRST(1) score=880 callback_frame_id=20 object_frame_id=0 rect=50,60-70,80 timestamp=200
+  object obj_id=9 state=FIRST(1) type=1 score=880 frame_id=0 rect=50,60-70,80 timestamp=200
+person_event obj_id=7 transition=TRACKING->LOST state=LOST(3) score=700 callback_frame_id=18 object_frame_id=0 rect=12,20-32,40 timestamp=180
+  object obj_id=7 state=LOST(3) type=1 score=700 frame_id=0 rect=12,20-32,40 timestamp=180
+person_event obj_id=9 transition=FIRST->DISPEAR state=DISPEAR(4) score=0 callback_frame_id=21 object_frame_id=0 rect=0,0-0,0 timestamp=210
+  object obj_id=9 state=DISPEAR(4) type=1 score=0 frame_id=0 rect=0,0-0,0 timestamp=210
+summary captures=24 mode=finite stop=limit frame_slots=4 qbufs=28 qbuf_failures=0 sequence_errors=2 capture_errors=1 accepted=24 pushed=24 push_failures=0 detected=24 detection_errors=0 detection_frame_errors=0 released=24 release_unmatched=3 release_duplicates=1 release_mismatches=2 person=999 tracking=888 fd_lifecycle=complete t1=not_claimed

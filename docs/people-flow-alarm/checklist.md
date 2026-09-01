@@ -38,6 +38,13 @@
       原生 V4L2 60 帧运行为 `person=58 tracking=50`，并观察到
       `FIRST/TRACKING/LOST/DISPEAR`。这只是单轮候选证据，真实采集流纪元和长期稳定性
       仍未验证。
+- [x] 2026-09-01 CLS8 原生 V4L2 900 帧模型对比完成
+      `captures/pushed/detected/released=900/900/900/900` callback 闭环，
+      `person=725`、`tracking=630`，观察到 15 个事件 `obj_id`；该结果仅记录为模型
+      对比证据，`person/tracking` 是 observation 次数，不是人数。
+- [ ] CLS8 对比的 V4L2 sequence 连续性和跟踪稳定性已验收；本轮
+      `sequence_errors=53`，且 15 个 `obj_id` 伴随明显 `FIRST/LOST/TRACKING/DISAPPEAR`
+      重建，T1 仍未通过。
 - [ ] 有人场景下的 DMA-BUF/物理地址输入已验收；隔离 `/dev/video25` 的单物理平面
       `'NV12'` DMA-BUF、release callback、停止、短时重启和格式恢复已有证据，但
       GStreamer runner 第一个 sample 不是 DMA-BUF，完整链路、异步停止和 UAF 仍未验证。
@@ -47,13 +54,14 @@
 当前暂停记录（2026-08-31 起，2026-09-01 更新）：设备资源已达到本轮上限，停止
 更高占用和并发板端复测；这不是 RockIVA 检测失败。CPU-NV12 和一轮有人场景
 DMA-BUF 检测/跟踪已有正向候选证据，隔离 `/dev/video25` 已有原生 DMA-BUF 生命周期
-和短时停止/重启证据；仍缺多轮稳定性、完整流 epoch 以及主编码连续性/点播并发证据。资源恢复后的最小
-复测入口见 `t1-board-blocker.md`，固定使用 `/dev/video25`，不得操作
-`/dev/video24`。
+和短时停止/重启证据；CLS8 900 帧对比虽完成 callback 闭环，但有 `sequence_errors=53`
+和明显 ID 重建，不能解除 T1；仍缺多轮稳定性、完整流 epoch 以及主编码连续性/点播并发
+证据。资源恢复后的最小复测入口见 `t1-board-blocker.md`，固定使用 `/dev/video25`，
+不得操作 `/dev/video24`。
 
-CPU-NV12 探针、隔离 V4L2 DMA-BUF 生命周期与停止/重启结果、运行时指纹和限制见
-`t1-board-result.md`。PFP 暂定为下一阶段候选，不代表精度、ID switch 或生产参数
-已经验收。
+CPU-NV12 探针、隔离 V4L2 DMA-BUF 生命周期与停止/重启结果、PFP/CLS8 对比、运行时
+指纹和限制见 `t1-board-result.md`。PFP 暂定为下一阶段候选；CLS8 本轮仅为比较结果，
+不代表精度、ID switch 或生产参数已经验收。
 
 ## T2 观察结果与配置契约
 
