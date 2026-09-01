@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送任务分解
 
-状态：T0/T2/T4 已完成；T1 已完成 CPU-NV12 与隔离采集 DMA-BUF 生命周期子门禁但仍在进行；T3 仍阻塞于 T1
+状态：T0/T2/T4 已完成；T1 已取得 CPU-NV12、隔离采集 DMA-BUF 生命周期及一轮 60 帧有人场景子证据，但因设备资源达到本轮上限而暂停；T3 仍阻塞于 T1
 上游规格：`docs/people-flow-alarm/spec.md`
 上游计划：`docs/people-flow-alarm/plan.md`
 本文件作用：记录经确认的 T0-T12 纵向任务、阻塞关系和验收边界
@@ -64,7 +64,7 @@ T10 + T11 -> T12
 
 **Blocked by:** T0 — 基线与回滚开关。
 
-**Status:** in progress（CPU-NV12 有人片段通过；隔离原生 DMA-BUF 生命周期和短时停止/重启边界通过；当前有人场景、完整流边界和主视频连续性仍待验证）
+**Status:** in progress（CPU-NV12 有人片段、`test1.mp4` 人群压力样本和一轮 60 帧有人场景 DMA-BUF 候选运行通过；隔离原生 DMA-BUF 生命周期和短时停止/重启边界通过；因设备资源达到本轮上限暂时停止更高占用板端复测；完整流边界和主视频连续性仍待验证）
 
 探针已落地为非产品路径：`media_engine/tests/board/rockiva_probe/`。它提供
 SDK 交叉编译 Makefile、运行脚本、CPU 地址 NV12 输入、DET 回调、帧释放回调、
@@ -74,19 +74,39 @@ SDK 交叉编译 Makefile、运行脚本、CPU 地址 NV12 输入、DET 回调�
 原生 V4L2 MMAP/EXPBUF 到 RockIVA 生命周期试验。2026-08-31 连续两次各采集 30 帧，
 序列分别为 `48108..48137`、`48156..48185`，每次均为 `30/30/30/30` capture/push/
 detect/release，`sequence_errors=0`；两次直接退出码均为 `1`，原因是当前画面没有
-person/tracking。该结果只支持短时隔离停止/重启边界，不支持有人场景、完整流 epoch、
-异步停止回调或主视频连续性结论，因此本任务尚未完成。
+person/tracking。该结果只支持短时隔离停止/重启边界，不替代有人场景的多轮稳定性、
+完整流 epoch、异步停止回调或主视频连续性结论，因此本任务尚未完成。
+
+2026-09-01 在同一 `/dev/video25` 上完成一轮 60 帧有人场景运行：序列
+`1807150..1807209` 连续，`captures/pushed/detected/released=60/60/60/60`，所有
+sequence/capture/push/release 错误计数为 0，`person=58`、`tracking=50`，观察到
+`obj_id=2` 的 `FIRST/LOST/TRACKING/DISPEAR` 与 `obj_id=3` 的 `FIRST/TRACKING`。
+直接退出码为 0；`ROCKIVA_WaitFinish=-5` 由有界 callback completion fallback
+完成收尾。该轮只是单次候选证据，仍需多场景、重复运行和长期边界验证。
+
+同日使用 `/home/Tiger/Documents/rtsp_demo/test1.mp4` 生成 60 帧 `640x360 NV12`
+CPU 地址压力样本，PFP 探针结果为 `pushed=60`、`detection_callbacks=60`、
+`released_frames=60`、`person=770`、`tracking=425`，直接退出码为 0。该样本用于
+密集人群压力观察，不替代 DMA-BUF 或唯一人数验收。
+
+当前暂停不是检测失败。CPU-NV12 已有包含人员的正向检测/跟踪证据，隔离
+`/dev/video25` 已有原生 DMA-BUF capture/push/detect/release、短时停止/重启以及一轮
+60 帧有人场景候选证据；但设备资源已达到本轮上限，现阶段不再执行更高占用板端命令。
+恢复后仍需补多轮有人场景 DMA-BUF 检出/tracking、完整流 epoch（包括异步停止回调和
+长期重复启停）以及主编码连续性/点播并发证据。最小恢复入口见 `t1-board-blocker.md`，固定使用
+`/dev/video25`，不得触碰 `/dev/video24`。
 
 2026-08-27 的网络不可达记录保留在 `docs/people-flow-alarm/t1-board-blocker.md`；
 2026-08-28 已通过 ADB 在同一板卡完成 CPU-NV12 PFP/CLS8 探针。结果、库/模型指纹、
 `ROCKIVA_WaitFinish` 不支持的受限 fallback，以及未完成边界见
 `docs/people-flow-alarm/t1-board-result.md`。这些证据不解除 T3：有人场景下的
-DMA-BUF 检出仍未验证；短时隔离停止/重启已有证据，但完整流 epoch、异步回调、
+DMA-BUF 已有一轮 60 帧检出/tracking 候选证据；短时隔离停止/重启已有证据，但完整流 epoch、异步回调、
 UAF/泄漏、主路径 sequence 和编码连续性仍未验证。另一次 GStreamer DMA-BUF runner
 在第一个 sample 因内存不是 DMA-BUF 被拒绝，不能与原生 `VIDIOC_EXPBUF` 结果混同。
 
-- [ ] 在候选分辨率和采样率下取得稳定 person 检出及 `objId/state` 生命周期；当前两次
-      原生 V4L2 运行均为 `person=0 tracking=0`。
+- [ ] 在候选分辨率和采样率下取得稳定 DMA-BUF person 检出及 `objId/state` 生命周期；
+      2026-09-01 原生 V4L2 60 帧运行已有 `person=58 tracking=50` 的候选证据，
+      但仍需多轮场景和长期稳定性验证。
 - [ ] 固化经过测量的模型、结果模式、核心掩码、帧格式和输入方式。
 - [ ] 证明 push、release callback、停止和重启无泄漏、重复释放或悬空引用。
 - [ ] 证明分析分支关闭点播后仍可运行，且启停不影响主视频。

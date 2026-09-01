@@ -30,13 +30,26 @@
       测试了 `coreMask=0x0/0x4`，CLS8 测试了 `coreMask=0x0`。原生 V4L2 PFP
       `640x360`、`coreMask=0x0` 的 DMA-BUF fd 生命周期也有真板数据，未将相机采样率
       误记为 10 FPS。
-- [ ] person 检出和 `objId/state` 变化已有录制结果；2026-08-31 两次原生 V4L2
-      运行均为 `person=0 tracking=0`，真实采集流纪元边界仍未验证。
+- [x] 使用 `/home/Tiger/Documents/rtsp_demo/test1.mp4` 生成的 60 帧 `640x360 NV12`
+      CPU 地址压力样本在板端完成 `60/60/60` push/detect/release，`person=770`、
+      `tracking=425`；该结果只作为密集人群压力证据，不作为唯一人数或 DMA-BUF 生产
+      验收。
+- [x] DMA-BUF 场景下 person 检出和 `objId/state` 变化已有一轮录制结果；2026-09-01
+      原生 V4L2 60 帧运行为 `person=58 tracking=50`，并观察到
+      `FIRST/TRACKING/LOST/DISPEAR`。这只是单轮候选证据，真实采集流纪元和长期稳定性
+      仍未验证。
 - [ ] 有人场景下的 DMA-BUF/物理地址输入已验收；隔离 `/dev/video25` 的单物理平面
       `'NV12'` DMA-BUF、release callback、停止、短时重启和格式恢复已有证据，但
       GStreamer runner 第一个 sample 不是 DMA-BUF，完整链路、异步停止和 UAF 仍未验证。
 - [ ] 分析启停不影响主编码和点播；目前只有 `/dev/video24` PID/RSS/FD 只读快照，
       没有主路径 sequence 或编码连续性证据。
+
+当前暂停记录（2026-08-31 起，2026-09-01 更新）：设备资源已达到本轮上限，停止
+更高占用和并发板端复测；这不是 RockIVA 检测失败。CPU-NV12 和一轮有人场景
+DMA-BUF 检测/跟踪已有正向候选证据，隔离 `/dev/video25` 已有原生 DMA-BUF 生命周期
+和短时停止/重启证据；仍缺多轮稳定性、完整流 epoch 以及主编码连续性/点播并发证据。资源恢复后的最小
+复测入口见 `t1-board-blocker.md`，固定使用 `/dev/video25`，不得操作
+`/dev/video24`。
 
 CPU-NV12 探针、隔离 V4L2 DMA-BUF 生命周期与停止/重启结果、运行时指纹和限制见
 `t1-board-result.md`。PFP 暂定为下一阶段候选，不代表精度、ID switch 或生产参数

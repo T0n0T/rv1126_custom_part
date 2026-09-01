@@ -1,11 +1,11 @@
 # T1 RV1126B RockIVA 探针结果
 
-日期：2026-08-28、2026-08-31（Asia/Shanghai）
+日期：2026-08-28、2026-08-31、2026-09-01（Asia/Shanghai）
 
 ## 范围与输入
 
-本记录只覆盖非产品探针的 CPU 地址 NV12 输入和 RockIVA DET 回调；未改动
-`media_engine`、daemon 或板端持久配置。输入来自已目视确认包含施工人员的
+本记录覆盖非产品探针的 CPU 地址 NV12、原生 V4L2 DMA-BUF 输入和 RockIVA DET
+回调；未改动 `media_engine`、daemon 或板端持久配置。CPU 输入来自已目视确认包含施工人员的
 `/home/Tiger/Documents/code/agent/yolo_bytetrack/data/input.mp4` 的 00:00:01
 起始片段，按以下参数生成：
 
@@ -121,11 +121,77 @@ PFP、`640x360`、30 帧、`coreMask=0x0`、`MIN_PERSON=1`、`MIN_TRACKING=1`。
 `/tmp/t1-board-dmabuf-20260831-164525.log`。这与上面的原生 `VIDIOC_EXPBUF` 路径
 是两个不同的输入实现，不能把 GStreamer 失败写成 RockIVA 检测结果。
 
+## 2026-09-01 原生 V4L2->RockIVA 60 帧有人场景
+
+在设备资源允许的短时窗口内，使用隔离节点 `/dev/video25` 完成一轮 60 帧原生
+V4L2 `MMAP + VIDIOC_EXPBUF` 探针。参数为 PFP、`640x360`、`coreMask=0x0`、
+`MIN_PERSON=1`、`MIN_TRACKING=1`、`ALLOW_MAINPATH=0`；探针未声明相机采样率。
+原始日志为 `/tmp/t1-v4l2-rockiva-person-60-20260901-091122.log`。
+
+| 项目 | 结果 |
+| --- | --- |
+| sequence | `1807150..1807209`，连续 60 帧 |
+| captures/pushed/detected/released | `60/60/60/60` |
+| sequence/capture/push/release 错误 | `0/0/0/0` |
+| person/tracking observations | `58/50` |
+| person states | `FIRST=2`、`TRACKING=50`、`LOST=5`、`DISPEAR=1` |
+| detect/release latency | 平均 `18.067/18.106 ms`，范围 `14.954..21.274/14.993..21.305 ms` |
+| 直接退出码 | `0`，`ROCKIVA_WaitFinish=-5` 由有界 callback completion fallback 完成收尾 |
+| format restore | `ok`，恢复为 `3840x2160 NV12` |
+| 日志 SHA-256 | `b45427d67481a996d304591a0834a987f7e2fa5efb6c8ad52e8410befcbc9cd9` |
+
+该轮观察到两个 `objId`：`obj_id=2` 在第 1 帧为 `FIRST`，随后经历
+`TRACKING/LOST/DISPEAR`；第 12 帧出现 `obj_id=3` 为 `FIRST`，第 13--60 帧持续
+`TRACKING`。这证明了有人场景下单次 DMA-BUF 检出和回调释放闭环，但不证明跨场景
+ID 稳定、遮挡恢复、长期启停或生产分支可用性；`obj_id=2` 与 `obj_id=3` 的切换
+也不能解释为真实人员进出计数。
+
+本轮结束后的只读收尾快照：`/dev/video25` 无残留进程/fd；`media_engine` PID
+578，RSS `68412 kB`，17 线程、70 个 fd，其中 `/dev/video24` 仍为 2 个 fd；
+`/dev/video25` 已恢复 `3840x2160` 单物理平面 `NV12`，`/dev/video24` 保持
+`3840x2160` 两物理平面 `NM12`。这些快照不替代主路径 sequence、编码连续性和点播
+并发验收。
+
+## 2026-09-01 `test1.mp4` CPU-NV12 人群压力样本
+
+为验证用户提供的离线源，使用
+`/home/Tiger/Documents/rtsp_demo/test1.mp4`（H.264 Main、`768x432`、约
+`59.94 FPS`、`11.878533 s`）生成紧凑 CPU 地址 NV12 输入：
+
+```sh
+ffmpeg -ss 1 -i test1.mp4 -vf 'fps=10,scale=640:360:flags=lanczos' \
+  -frames:v 60 -pix_fmt nv12 -f rawvideo test1-person-640x360-60.nv12
+```
+
+源文件 SHA-256 为
+`b3559aebdf182fc0b35ca4009f0ae6ed776b6d577a6695666237ba911affd6d3`；生成的
+60 帧输入为 `20,736,000` bytes，SHA-256 为
+`54182d45d49875051722e405f20a4332fb4315ae9b7c7a53a9d675af7abb2995`。在板端使用
+PFP、`640x360`、60 帧、`FPS=10`、`coreMask=0x0`、`MIN_PERSON=1`、
+`MIN_TRACKING=1` 运行 CPU-NV12 探针；原始日志为
+`/tmp/test1-board-rockiva-20260901.log`，日志 SHA-256 为
+`726d1268777c10606afd062a02870ad4b154c95138c488ddda54297107d6d417`。
+
+| 项目 | 结果 |
+| --- | --- |
+| push/detect/release callbacks | `60/60/60`，所有 push、检测、释放错误为 0 |
+| person observations | `770`（观察次数，不是唯一人数） |
+| person states | `FIRST=72`、`TRACKING=425`、`LOST=215`、`DISPEAR=58` |
+| 观测到的 `objId` 数量 | `72`（不代表 72 个真实人员） |
+| detect/release latency | 平均 `20.483/20.573 ms`，检测范围 `15.229..32.240 ms` |
+| SDK 收尾 | `WaitFinish=-5` 走有界 callback fallback，`DETECT_Release`/`Release` 成功 |
+| 直接退出码 | `0` |
+
+该样本包含密集人群和遮挡，适合做模型吞吐、目标生命周期和 ID 抖动压力样本；
+探针输入仍是 CPU `dataAddr`，不能替代 `/dev/video25` 的 DMA-BUF、实时采集、
+主编码并发或精度标注验收。`objId` 数量和 `person observations` 均不得直接转化为
+人流唯一计数。
+
 ## 当前判定
 
-- PFP 是下一阶段的暂定候选：在这一个未标注、3 秒的人员片段上，三组均稳定完成，
-  且 PFP 的平均回调时延低于 CLS8。该结果不构成精度、召回率、ID switch 或模型
-  发布结论。
+- PFP 是下一阶段的暂定候选：CPU-NV12 片段、`test1.mp4` 人群压力样本和一轮 60 帧
+  有人场景 DMA-BUF 运行均完成回调闭环，且 PFP 的平均回调时延低于 CLS8。样本仍
+  不足以形成精度、召回率、ID switch、遮挡恢复或模型发布结论。
 - `coreMask=0x0` 与 `0x4` 都可工作；当前样本不足以固化核心掩码，生产配置不得
   依据本表硬编码。
 - CPU `dataAddr` 的帧所有权、回调关联和 SDK 收尾已在真板得到正向证据。此前
@@ -134,11 +200,13 @@ PFP、`640x360`、30 帧、`coreMask=0x0`、`MIN_PERSON=1`、`MIN_TRACKING=1`。
   未变化；这只说明本次短时复测未观察到主进程退出或主路径 FD 变化，不能替代编码
   连续性、主路径 sequence 或点播回归。
 - GStreamer DMA-BUF runner 尚未产出可提交给 RockIVA 的 DMA-BUF sample；需要先解决
-  输入内存类型协商，再单独验证该链路。
+  输入内存类型协商，再单独验证该链路。原生 V4L2 60 帧结果不能替代 GStreamer
+  生产输入验证。
 
 ## 未解除的 T1 门禁
 
-1. 有人场景下的 DMA-BUF 检出、`objId/state` 生命周期和稳定性。
+1. 多轮有人场景下的 DMA-BUF 检出、`objId/state` 生命周期和稳定性；当前只有一轮
+   60 帧候选证据。
 2. 当前仅有两次短时隔离停止/重启的 callback 计数证据；流 epoch 切换、停止时的
    异步回调、无泄漏/UAF 和长期重复启停仍未证明。
 3. 与主编码/点播并发时的帧率、丢帧、CPU/NPU、温度和内存预算。
@@ -148,5 +216,7 @@ PFP、`640x360`、30 帧、`coreMask=0x0`、`MIN_PERSON=1`、`MIN_TRACKING=1`。
 
 完整的本机原始日志保留在
 `/tmp/rockiva-t1-frames.JqRE62/t1-rockiva-*-fallback.log`、
-`/tmp/t1-v4l2-rockiva-restart-20260831-165409.log` 和
-`/tmp/t1-board-dmabuf-20260831-164525.log`；它们是会话证据，不作为固件或仓库发布物。
+`/tmp/t1-v4l2-rockiva-restart-20260831-165409.log`、
+`/tmp/t1-v4l2-rockiva-person-60-20260901-091122.log` 和
+`/tmp/t1-board-dmabuf-20260831-164525.log`、`/tmp/test1-board-rockiva-20260901.log`；
+它们是会话证据，不作为固件或仓库发布物。

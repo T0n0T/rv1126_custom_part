@@ -1,11 +1,60 @@
-# T1 真板连接阻塞记录（历史）
+# T1 真板连接与资源阻塞记录
 
-日期：2026-08-27（Asia/Shanghai）
+记录日期：2026-08-27 起，最近更新：2026-09-01（Asia/Shanghai）
 
 > 2026-08-28 已通过 ADB 恢复真板连接并完成 CPU-NV12 RockIVA 探针；2026-08-31
-> 又完成隔离 `/dev/video25` 的原生 V4L2 DMA-BUF 生命周期探针。连接阻塞已解除，
-> 但 T1 仍未完成：有人场景、采集重启和主视频隔离仍是硬门禁。实测结果见
+> 又完成隔离 `/dev/video25` 的原生 V4L2 DMA-BUF 生命周期探针，2026-09-01
+> 取得一轮 60 帧有人场景结果。连接阻塞已解除，但 T1 仍未完成：代表性重复场景、
+> 完整流边界和主视频隔离仍是硬门禁。实测结果见
 > `t1-board-result.md`。
+
+## 2026-08-31 起设备资源上限暂停
+
+当前设备资源已达到本轮允许上限，暂停更高占用和并发板端复测；不再增加
+RockIVA、V4L2 或采集管线占用，也不操作 `/dev/video24`。本轮仅保留一轮短时
+60 帧有人场景结果作为候选证据。这是设备资源/测试窗口上限导致的暂停，不是
+RockIVA 检测失败：
+
+- CPU-NV12 有人片段已经取得 person 检出、`FIRST/TRACKING/LOST/DISPEAR` 状态和
+  回调释放闭环的正向证据；
+- `/home/Tiger/Documents/rtsp_demo/test1.mp4` 生成的密集人群 CPU-NV12 样本也已完成
+  60 帧检测/释放闭环，可用于压力观察但不替代 DMA-BUF 验收；
+- 隔离 `/dev/video25` 已取得原生 V4L2 单物理平面 DMA-BUF 的 capture/push/detect/
+  release 生命周期及短时停止/重启证据；
+- 已取得一轮有人场景下的 DMA-BUF 检出/tracking 候选结果，但仍缺少代表性重复场景、
+  完整流 epoch（含异步停止回调和长期重复启停）以及主编码连续性/点播并发证据。
+
+因此 T1 保持 `in progress`，T3 继续保持阻塞。资源恢复前不得用单次候选结果、空场景、
+CPU-NV12 结果或已有生命周期结果替代完整验收边界。
+
+## 资源恢复后的最小 DMA-BUF 复测入口
+
+仅在设备资源恢复并确认可以进行下一轮短时隔离试验后，使用 `/dev/video25`，不设置
+`ALLOW_MAINPATH=1`，优先重复有人场景并保存 probe 直接退出码：
+
+```sh
+SDK=/home/Tiger/Documents/code/linux/rv1126b_sdk/rv1126b_linux_ipc_xiaoyu
+PROBE=$SDK/custom_part/media_engine/tests/board/rockiva_probe
+ADB=192.168.1.63:5555
+
+make -C "$PROBE" v4l2_rockiva_probe SDK_ROOT="$SDK"
+adb -s "$ADB" get-state
+adb -s "$ADB" push "$PROBE/v4l2_rockiva_probe" /tmp/v4l2_rockiva_probe
+adb -s "$ADB" push "$PROBE/run_v4l2_rockiva_probe.sh" /tmp/run_v4l2_rockiva_probe.sh
+adb -s "$ADB" shell 'chmod 755 /tmp/v4l2_rockiva_probe /tmp/run_v4l2_rockiva_probe.sh
+  DEVICE=/dev/video25 MODEL_PATH=/oem/usr/lib ROCKIVA_LIB_DIR=/oem/usr/lib \
+  WIDTH=640 HEIGHT=360 FRAMES=60 MODEL=pfp MIN_PERSON=1 MIN_TRACKING=1 \
+  ALLOW_MAINPATH=0 /tmp/run_v4l2_rockiva_probe.sh >/tmp/t1-v4l2-rockiva-person.log 2>&1
+  probe_status=$?
+  cat /tmp/t1-v4l2-rockiva-person.log
+  printf "PROBE_DIRECT_EXIT_STATUS=%s\n" "$probe_status"
+  exit 0'
+```
+
+复测至少记录 `objId/state` 生命周期、`sequence_errors`、callback 计数、推理/释放
+时延和直接退出码；只有在多轮有人场景结果可重复后，才继续安排完整 epoch、主编码/
+点播并发和长期资源边界验证。`adb shell` 的传输退出码不能代替日志中的
+`PROBE_DIRECT_EXIT_STATUS`。
 
 ## 2026-08-27 历史结论
 
@@ -41,10 +90,10 @@ ping 仍为全丢包；本次没有推送或运行任何探针，也没有打开
 `192.168.1.99` 在线，未发现目标板的新地址。
 
 该次早先重试的阻塞是板卡网络/地址可达性，不是 RockIVA 探针或生产代码错误。
-随后 ADB 已恢复到 `192.168.1.63:5555`，并完成 CPU-NV12、隔离 DMA-BUF 和
-两次原生 V4L2->RockIVA 重启边界复测；最新结果见 `t1-board-result.md`。
-当前实际阻塞已收敛为 `/dev/video25` 采集画面没有行人，尚无有人场景下的
-DMA-BUF 检出/tracking 证据，因此不解除 T1，也不推进 T3 生产分析分支。
+随后 ADB 已恢复到 `192.168.1.63:5555`，并完成 CPU-NV12、隔离 DMA-BUF、
+两次原生 V4L2->RockIVA 重启边界和一轮 60 帧有人场景复测；最新结果见
+`t1-board-result.md`。当前实际阻塞已收敛为代表性重复场景、完整流边界、主视频连续性
+和生产输入协商证据不足，因此不解除 T1，也不推进 T3 生产分析分支。
 
 ## 板卡恢复后的最小流程
 
@@ -91,5 +140,5 @@ rg -a '^PROBE_DIRECT_EXIT_STATUS=0$' t1-rockiva-board.log
 `width * height * 3 / 2` 字节/帧；30 帧的 `640x360` 文件总计
 `10,368,000` 字节。全零或其他合成空场景只能验证格式和帧所有权，不能作为
 person/tracking 证据。隔离节点的真实采集 DMA-BUF 生命周期已单独通过，但仍必须
-在有人场景下记录 `objId/state`、推理时延、NPU/CPU/内存、温度、丢帧和主视频不受
-影响的证据，另补采集重启边界，才可解除 T3。
+在有人场景下补多轮 `objId/state` 稳定性、推理时延、NPU/CPU/内存、温度、丢帧和
+主视频不受影响的证据，另补采集重启边界，才可解除 T3。
