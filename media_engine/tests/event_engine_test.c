@@ -249,7 +249,8 @@ static void test_occupancy_lifecycle(void)
 	      "explicit process restart closes active event");
 	CHECK(capture.events[6].reason == ME_EVENT_REASON_PROCESS_RESTART,
 	      "restart reason is preserved");
-	me_event_engine_deinit(&engine);
+	CHECK(me_event_engine_deinit(&engine, err, sizeof(err)) == 0,
+	      "occupancy engine deinitializes cleanly");
 }
 
 static void test_line_crossing_and_reconfigure(void)
@@ -266,6 +267,7 @@ static void test_line_crossing_and_reconfigure(void)
 	line.confirm_ms = 1000;
 	line.disappear_grace_ms = 100;
 	line.cooldown_ms = 0;
+	line.update_interval_ms = 1;
 	CHECK(me_event_engine_init(&engine, &line, 5, capture_event, &capture, err,
 	                          sizeof(err)) == 0,
 	      "line-cross engine initializes");
@@ -291,11 +293,15 @@ static void test_line_crossing_and_reconfigure(void)
 	      "line debounce suppresses repeated hit");
 	observation = make_observation(1, 4, 10250000);
 	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
-	         ME_RULE_DIRECTION_IN, 0);
+	         ME_RULE_DIRECTION_IN, 201);
 	rc = me_event_engine_process(&engine, &observation, err, sizeof(err));
-	CHECK(rc == 1 && capture.count == 2, "accepted line hit emits UPDATE");
+	CHECK(rc == 1 && capture.count == 2,
+	      "new track line fact emits UPDATE without global suppression");
 	assert_event(&capture, 1, ME_EVENT_PHASE_UPDATE, ME_EVENT_REASON_DIRECTION, 2);
-	CHECK(capture.events[1].delta_in == 1, "line UPDATE carries inbound delta");
+	CHECK(capture.events[1].delta_in == 1 &&
+	              capture.events[1].responsible_track_count == 1 &&
+	              capture.events[1].responsible_track_ids[0] == 201,
+	      "line UPDATE carries only the new inbound fact");
 
 	observation = make_observation(1, 5, 10450000);
 	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 0,
@@ -311,14 +317,16 @@ static void test_line_crossing_and_reconfigure(void)
 	line.confirm_frames = 1;
 	observation = make_observation(1, 7, 11000000);
 	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
-	         ME_RULE_DIRECTION_OUT, 0);
+	         ME_RULE_DIRECTION_IN, 201);
 	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 0,
 	      "second line candidate begins");
 	observation = make_observation(1, 8, 11100000);
 	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
-	         ME_RULE_DIRECTION_OUT, 0);
+	         ME_RULE_DIRECTION_IN, 201);
 	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 1,
 	      "second line candidate starts");
+	CHECK(capture.events[3].delta_in == 1,
+	      "new lifecycle accepts a repeated track fact again");
 	occupancy.confirm_frames = 1;
 	occupancy.debounce_ms = 0;
 	rc = me_event_engine_reconfigure(&engine, &occupancy, 9, err, sizeof(err));
@@ -348,7 +356,8 @@ static void test_line_crossing_and_reconfigure(void)
 	      "disabling analytics closes active event");
 	CHECK(capture.events[6].reason == ME_EVENT_REASON_ANALYTICS_DISABLED,
 	      "analytics disabled reason is preserved");
-	me_event_engine_deinit(&engine);
+	CHECK(me_event_engine_deinit(&engine, err, sizeof(err)) == 0,
+	      "reconfigured engine deinitializes cleanly");
 }
 
 static void test_line_scope_and_roi_debounce(void)
@@ -392,26 +401,39 @@ static void test_line_scope_and_roi_debounce(void)
 
 	observation = make_observation(1, 3, 20200000);
 	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
-	         ME_RULE_DIRECTION_IN, 101);
+	         ME_RULE_DIRECTION_IN, 103);
 	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
-	         ME_RULE_DIRECTION_OUT, 102);
+	         ME_RULE_DIRECTION_OUT, 104);
 	rc = me_event_engine_process(&engine, &observation, err, sizeof(err));
 	CHECK(rc == 1 && capture.count == 2,
-	      "grouped direction change emits UPDATE");
+	      "different track facts emit one grouped UPDATE");
 	CHECK(capture.events[1].delta_in == 1 &&
 	              capture.events[1].delta_out == 1 &&
 	              capture.events[1].responsible_track_count == 2,
-	      "UPDATE preserves direction deltas and responsible tracks");
+	      "UPDATE preserves new direction deltas and responsible tracks");
+	CHECK(capture.events[1].responsible_track_ids[0] == 103 &&
+	              capture.events[1].responsible_track_ids[1] == 104,
+	      "UPDATE identifies both new fact tracks");
 
 	observation = make_observation(1, 4, 20300000);
+	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
+	         ME_RULE_DIRECTION_IN, 103);
+	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
+	         ME_RULE_DIRECTION_OUT, 104);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 0 &&
+	              capture.count == 2,
+	      "repeated direction facts remain deduplicated");
+
+	observation = make_observation(1, 5, 20400000);
 	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 1 &&
 	              capture.count == 3 &&
-              capture.events[2].phase == ME_EVENT_PHASE_END &&
-              capture.events[2].responsible_track_count == 2 &&
-              capture.events[2].responsible_track_ids[0] == 101 &&
-              capture.events[2].responsible_track_ids[1] == 102,
+	              capture.events[2].phase == ME_EVENT_PHASE_END &&
+	              capture.events[2].responsible_track_count == 2 &&
+	              capture.events[2].responsible_track_ids[0] == 103 &&
+	              capture.events[2].responsible_track_ids[1] == 104,
       "line END retains the last responsible tracks");
-	me_event_engine_deinit(&engine);
+	CHECK(me_event_engine_deinit(&engine, err, sizeof(err)) == 0,
+	      "line engine deinitializes cleanly");
 	memset(&capture, 0, sizeof(capture));
 
 	occupancy.confirm_frames = 1;
@@ -471,7 +493,360 @@ static void test_line_scope_and_roi_debounce(void)
 	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 1 &&
 	              capture.events[capture.count - 1].person_count == 1,
 	      "ROI exit updates count after debounce");
-	me_event_engine_deinit(&engine);
+	CHECK(me_event_engine_deinit(&engine, err, sizeof(err)) == 1,
+	      "deinit returns its restart END count");
+}
+
+static void test_line_fact_recurrence(void)
+{
+	MeAnalyticsConfig config = test_config(ME_RULE_TYPE_LINE_CROSS);
+	MeEventEngine engine;
+	EventCapture capture = {0};
+	MeNormalizedObservation observation;
+	char err[256];
+
+	config.confirm_frames = 1;
+	config.confirm_ms = 1;
+	config.debounce_ms = 0;
+	config.disappear_grace_ms = 1000;
+	config.cooldown_ms = 0;
+	config.update_interval_ms = 1;
+	CHECK(me_event_engine_init(&engine, &config, 14, capture_event, &capture,
+	                          err, sizeof(err)) == 0,
+	      "line recurrence engine initializes");
+
+	observation = make_observation(1, 1, 40000000);
+	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
+	         ME_RULE_DIRECTION_IN, 81);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 1 &&
+	              capture.events[0].delta_in == 1,
+	      "first line fact starts the event");
+
+	observation = make_observation(1, 2, 40010000);
+	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
+	         ME_RULE_DIRECTION_IN, 81);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 0 &&
+	              capture.count == 1,
+	      "consecutive line fact is deduplicated");
+
+	observation = make_observation(1, 3, 40020000);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 0,
+	      "missing line fact opens a grace interval");
+
+	observation = make_observation(1, 4, 40030000);
+	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
+	         ME_RULE_DIRECTION_IN, 81);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 1 &&
+	              capture.count == 2 && capture.events[1].delta_in == 1 &&
+	              capture.events[1].responsible_track_count == 1 &&
+	              capture.events[1].responsible_track_ids[0] == 81,
+	      "reappearing line fact counts as a new occurrence");
+
+	observation = make_observation(1, 5, 41030000);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 0,
+	      "second line absence starts grace interval");
+	observation = make_observation(1, 6, 42030000);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 1 &&
+	              capture.count == 3 &&
+	              capture.events[2].phase == ME_EVENT_PHASE_END,
+	      "line recurrence event ends after grace expiry");
+	CHECK(me_event_engine_deinit(&engine, err, sizeof(err)) == 0,
+	      "line recurrence engine deinitializes cleanly");
+}
+
+static void test_rule_level_fact_policy(void)
+{
+	MeAnalyticsConfig config = test_config(ME_RULE_TYPE_LINE_CROSS);
+	MeEventEngine engine;
+	EventCapture capture = {0};
+	MeNormalizedObservation observation;
+	char err[256];
+
+	config.confirm_frames = 1;
+	config.confirm_ms = 1;
+	config.debounce_ms = 0;
+	config.disappear_grace_ms = 1000;
+	config.cooldown_ms = 0;
+	config.update_interval_ms = 1;
+	CHECK(me_event_engine_init(&engine, &config, 15, capture_event, &capture,
+	                          err, sizeof(err)) == 0,
+	      "rule-level fact engine initializes");
+
+	observation = make_observation(1, 1, 50000000);
+	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
+	         ME_RULE_DIRECTION_IN, 0);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 1 &&
+	              capture.events[0].delta_in == 1 &&
+	              capture.events[0].responsible_track_count == 0,
+	      "rule-level fact starts without a target identity");
+
+	observation = make_observation(1, 2, 50010000);
+	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
+	         ME_RULE_DIRECTION_IN, 0);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 0 &&
+	              capture.count == 1,
+	      "consecutive rule-level fact is deduplicated");
+
+	observation = make_observation(1, 3, 50020000);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 0,
+	      "missing rule-level fact opens a grace interval");
+
+	observation = make_observation(1, 4, 50030000);
+	add_rule(&observation, "entrance", ME_RULE_TYPE_LINE_CROSS,
+	         ME_RULE_DIRECTION_IN, 0);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 1 &&
+	              capture.count == 2 && capture.events[1].delta_in == 1 &&
+	              capture.events[1].responsible_track_count == 0,
+	      "reappearing rule-level fact counts without inventing identity");
+	CHECK(me_event_engine_close(&engine, ME_EVENT_REASON_PROCESS_RESTART, err,
+	                           sizeof(err)) == 1 &&
+	              capture.count == 3,
+	      "rule-level fact event closes explicitly");
+	CHECK(me_event_engine_deinit(&engine, err, sizeof(err)) == 0,
+	      "rule-level fact engine deinitializes cleanly");
+}
+
+static void test_deinit_closes_active_event(void)
+{
+	MeAnalyticsConfig config = test_config(ME_RULE_TYPE_OCCUPANCY);
+	MeEventEngine engine;
+	EventCapture capture = {0};
+	MeNormalizedObservation observation;
+	char err[256];
+
+	config.confirm_frames = 1;
+	config.confirm_ms = 1;
+	config.debounce_ms = 0;
+	config.cooldown_ms = 0;
+	CHECK(me_event_engine_init(&engine, &config, 20, capture_event, &capture,
+	                          err, sizeof(err)) == 0,
+	      "deinit test engine initializes");
+
+	observation = make_observation(1, 1, 40000000);
+	add_person(&observation, 41, ME_TRACK_STATE_NEW, 2000);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 1 &&
+	              capture.count == 1,
+	      "deinit test starts an active event");
+
+	CHECK(me_event_engine_deinit(&engine, err, sizeof(err)) == 1,
+	      "deinit returns its restart END count");
+	CHECK(capture.count == 2 &&
+	              capture.events[1].phase == ME_EVENT_PHASE_END &&
+	              capture.events[1].reason == ME_EVENT_REASON_PROCESS_RESTART,
+		      "deinit emits process restart END");
+}
+
+static bool prepare_pending_occupancy(MeEventEngine *engine,
+					      EventCapture *capture, char *err)
+{
+	MeAnalyticsConfig config = test_config(ME_RULE_TYPE_OCCUPANCY);
+	MeNormalizedObservation observation;
+
+	config.confirm_frames = 1;
+	config.confirm_ms = 1;
+	config.debounce_ms = 0;
+	config.cooldown_ms = 0;
+	config.update_interval_ms = 10000;
+	if (me_event_engine_init(engine, &config, 30, capture_event, capture, err,
+	                         256) != 0)
+		return false;
+	observation = make_observation(1, 1, 50000000);
+	add_person(&observation, 51, ME_TRACK_STATE_NEW, 2000);
+	if (me_event_engine_process(engine, &observation, err, 256) != 1)
+		return false;
+	observation = make_observation(1, 2, 50100000);
+	add_person(&observation, 51, ME_TRACK_STATE_ACTIVE, 2200);
+	add_person(&observation, 52, ME_TRACK_STATE_NEW, 2400);
+	return me_event_engine_process(engine, &observation, err, 256) == 0 &&
+	       capture->count == 1;
+}
+
+static void test_latest_count_on_boundary_endings(void)
+{
+	MeEventEngine engine;
+	EventCapture capture = {0};
+	MeNormalizedObservation observation;
+	MeAnalyticsConfig config;
+	char err[256];
+
+	CHECK(prepare_pending_occupancy(&engine, &capture, err),
+	      "close test prepares a pending latest count");
+	CHECK(me_event_engine_close(&engine, ME_EVENT_REASON_PROCESS_RESTART, err,
+	                           sizeof(err)) == 1 &&
+	              capture.events[1].person_count == 2,
+	      "close END reports the latest observed count");
+
+	memset(&capture, 0, sizeof(capture));
+	CHECK(prepare_pending_occupancy(&engine, &capture, err),
+	      "reconfigure test prepares a pending latest count");
+	config = test_config(ME_RULE_TYPE_OCCUPANCY);
+	CHECK(me_event_engine_reconfigure(&engine, &config, 31, err,
+	                                  sizeof(err)) == 1 &&
+	              capture.events[1].person_count == 2,
+	      "reconfigure END reports the latest observed count");
+	CHECK(me_event_engine_deinit(&engine, err, sizeof(err)) == 0,
+	      "reconfigured count engine deinitializes cleanly");
+
+	memset(&capture, 0, sizeof(capture));
+	CHECK(prepare_pending_occupancy(&engine, &capture, err),
+	      "stream reset test prepares a pending latest count");
+	observation = make_observation(2, 1, 50200000);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 1 &&
+	              capture.events[1].person_count == 2 &&
+	              capture.events[1].reason == ME_EVENT_REASON_STREAM_RESET,
+	      "stream reset END reports the latest observed count");
+	CHECK(me_event_engine_deinit(&engine, err, sizeof(err)) == 0,
+	      "reset count engine deinitializes cleanly");
+
+	memset(&capture, 0, sizeof(capture));
+	CHECK(prepare_pending_occupancy(&engine, &capture, err),
+	      "deinit count test prepares a pending latest count");
+	CHECK(me_event_engine_deinit(&engine, err, sizeof(err)) == 1,
+	      "count deinit returns its restart END count");
+	CHECK(capture.count == 2 && capture.events[1].person_count == 2,
+	      "deinit END reports the latest observed count");
+}
+
+static void test_config_version_monotonicity(void)
+{
+	MeAnalyticsConfig config = test_config(ME_RULE_TYPE_OCCUPANCY);
+	MeEventEngine engine;
+	MeEventEngine max_engine;
+	EventCapture capture = {0};
+	EventCapture max_capture = {0};
+	MeNormalizedObservation observation;
+	char err[256];
+
+	config.confirm_frames = 1;
+	config.confirm_ms = 1;
+	config.debounce_ms = 0;
+	config.cooldown_ms = 0;
+	CHECK(me_event_engine_init(&engine, &config, 4, capture_event, &capture,
+	                          err, sizeof(err)) == 0,
+	      "version test engine initializes");
+	observation = make_observation(1, 1, 60000000);
+	add_person(&observation, 61, ME_TRACK_STATE_NEW, 2000);
+	CHECK(me_event_engine_process(&engine, &observation, err, sizeof(err)) == 1,
+	      "version test starts an active event");
+	CHECK(me_event_engine_reconfigure(&engine, &config, 4, err,
+	                                  sizeof(err)) == -1 &&
+	              capture.count == 1 && engine.config_version == 4 &&
+	              me_event_engine_is_active(&engine),
+	      "equal config version is rejected without closing the event");
+	CHECK(me_event_engine_reconfigure(&engine, &config, 3, err,
+	                                  sizeof(err)) == -1 &&
+	              capture.count == 1 && engine.config_version == 4,
+	      "config version rollback is rejected");
+	CHECK(me_event_engine_reconfigure(&engine, &config, 5, err,
+	                                  sizeof(err)) == 1 &&
+	              capture.count == 2 && engine.config_version == 5,
+	      "higher config version closes and installs the new rule");
+	CHECK(me_event_engine_reconfigure(&engine, &config, 0, err,
+	                                  sizeof(err)) == 0 &&
+	              engine.config_version == 6,
+	      "automatic config version advances monotonically");
+	CHECK(me_event_engine_deinit(&engine, err, sizeof(err)) == 0,
+	      "version engine deinitializes cleanly");
+
+	CHECK(me_event_engine_init(&max_engine, &config, UINT64_MAX,
+	                          capture_event, &max_capture, err, sizeof(err)) == 0,
+	      "maximum version engine initializes");
+	CHECK(me_event_engine_reconfigure(&max_engine, &config, 0, err,
+	                                  sizeof(err)) == -1 &&
+	              max_engine.config_version == UINT64_MAX,
+	      "automatic config version exhaustion is rejected");
+	CHECK(me_event_engine_deinit(&max_engine, err, sizeof(err)) == 0,
+	      "maximum version engine deinitializes cleanly");
+}
+
+static void test_event_id_and_sequence_exhaustion(void)
+{
+	MeAnalyticsConfig config = test_config(ME_RULE_TYPE_OCCUPANCY);
+	MeEventEngine id_engine;
+	MeEventEngine sequence_engine;
+	MeEventEngine epoch_engine;
+	EventCapture id_capture = {0};
+	EventCapture sequence_capture = {0};
+	EventCapture epoch_capture = {0};
+	MeNormalizedObservation observation;
+	char err[256];
+
+	config.confirm_frames = 1;
+	config.confirm_ms = 1;
+	config.debounce_ms = 0;
+	config.cooldown_ms = 0;
+	CHECK(me_event_engine_init(&id_engine, &config, 40, capture_event,
+	                          &id_capture, err, sizeof(err)) == 0,
+	      "event id exhaustion engine initializes");
+	id_engine.next_event_serial = UINT64_MAX;
+	observation = make_observation(1, 1, 70000000);
+	add_person(&observation, 71, ME_TRACK_STATE_NEW, 2000);
+	CHECK(me_event_engine_process(&id_engine, &observation, err, sizeof(err)) == -1 &&
+	              id_capture.count == 0 && id_engine.next_event_serial == UINT64_MAX,
+	      "event id exhaustion returns an error without wrapping");
+	CHECK(me_event_engine_deinit(&id_engine, err, sizeof(err)) == 0,
+	      "event id exhaustion engine deinitializes cleanly");
+
+	CHECK(me_event_engine_init(&sequence_engine, &config, 41, capture_event,
+	                          &sequence_capture, err, sizeof(err)) == 0,
+	      "event sequence exhaustion engine initializes");
+	observation = make_observation(1, 1, 71000000);
+	add_person(&observation, 72, ME_TRACK_STATE_NEW, 2000);
+	CHECK(me_event_engine_process(&sequence_engine, &observation, err,
+	                              sizeof(err)) == 1,
+	      "sequence test starts an active event");
+	sequence_engine.active_event.event_seq = UINT64_MAX;
+	observation = make_observation(1, 2, 71100000);
+	add_person(&observation, 72, ME_TRACK_STATE_ACTIVE, 2200);
+	add_person(&observation, 73, ME_TRACK_STATE_NEW, 2400);
+	CHECK(me_event_engine_process(&sequence_engine, &observation, err,
+                              sizeof(err)) == -1 &&
+              sequence_capture.count == 1 &&
+              sequence_engine.active_event.event_seq == UINT64_MAX,
+	      "event sequence exhaustion returns an error without wrapping");
+	CHECK(me_event_engine_close(&sequence_engine,
+	                           ME_EVENT_REASON_PROCESS_RESTART, err,
+	                           sizeof(err)) == -1 &&
+              sequence_capture.count == 1 &&
+              me_event_engine_is_active(&sequence_engine),
+	      "close preserves an active event when its sequence is exhausted");
+	CHECK(me_event_engine_deinit(&sequence_engine, err, sizeof(err)) == -1 &&
+	              sequence_capture.count == 1 &&
+	              me_event_engine_is_active(&sequence_engine),
+	      "deinit preserves an active event when its sequence is exhausted");
+	sequence_engine.active_event.event_seq = 1;
+	CHECK(me_event_engine_deinit(&sequence_engine, err, sizeof(err)) == 1 &&
+		              sequence_capture.count == 2 &&
+		              sequence_capture.events[1].event_seq == 2,
+	      "deinit closes after the caller resolves sequence exhaustion");
+
+	CHECK(me_event_engine_init(&epoch_engine, &config, 42, capture_event,
+	                          &epoch_capture, err, sizeof(err)) == 0,
+	      "epoch exhaustion engine initializes");
+	observation = make_observation(1, 1, 72000000);
+	add_person(&observation, 74, ME_TRACK_STATE_NEW, 2000);
+	CHECK(me_event_engine_process(&epoch_engine, &observation, err,
+	                              sizeof(err)) == 1,
+	      "epoch exhaustion test starts an active event");
+	epoch_engine.active_event.event_seq = UINT64_MAX;
+	observation = make_observation(2, 1, 72100000);
+	CHECK(me_event_engine_process(&epoch_engine, &observation, err,
+	                              sizeof(err)) == -1 &&
+              epoch_capture.count == 1 && epoch_engine.active &&
+              epoch_engine.order.stream_epoch == 1 &&
+              epoch_engine.order.frame_id == 1,
+	      "failed epoch END does not commit new ordering state");
+	epoch_engine.active_event.event_seq = 1;
+	CHECK(me_event_engine_process(&epoch_engine, &observation, err,
+	                              sizeof(err)) == 1 &&
+              epoch_capture.count == 2 &&
+              epoch_capture.events[1].phase == ME_EVENT_PHASE_END &&
+              epoch_capture.events[1].reason == ME_EVENT_REASON_STREAM_RESET &&
+              epoch_engine.order.stream_epoch == 2 &&
+              !epoch_engine.active,
+	      "epoch reset retries after sequence exhaustion");
+	CHECK(me_event_engine_deinit(&epoch_engine, err, sizeof(err)) == 0,
+	      "epoch exhaustion engine deinitializes cleanly");
 }
 
 int main(void)
@@ -479,6 +854,12 @@ int main(void)
 	test_occupancy_lifecycle();
 	test_line_crossing_and_reconfigure();
 	test_line_scope_and_roi_debounce();
+	test_line_fact_recurrence();
+	test_rule_level_fact_policy();
+	test_deinit_closes_active_event();
+	test_latest_count_on_boundary_endings();
+	test_config_version_monotonicity();
+	test_event_id_and_sequence_exhaustion();
 	if (failures == 0)
 		printf("\nevent_engine: all tests passed\n");
 	else

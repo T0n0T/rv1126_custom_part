@@ -13,10 +13,13 @@ typedef struct {
 typedef struct {
 	const MeRuleFact *first;
 	uint32_t match_count;
+	uint32_t new_match_count;
 	uint32_t delta_in;
 	uint32_t delta_out;
 	uint32_t track_count;
 	uint64_t track_ids[ME_ANALYTICS_EVENT_MAX_TRACKS];
+	uint32_t fact_count;
+	const MeRuleFact *facts[ME_ANALYTICS_MAX_RULE_FACTS];
 } MeRuleSummary;
 
 static void event_set_err(char *err, size_t errsz, const char *fmt, ...)
@@ -48,22 +51,32 @@ static uint64_t channel_hash(const char *channel_id)
 	return hash;
 }
 
+static bool scale_to_us(uint64_t value, uint64_t numerator,
+			       uint64_t denominator, int64_t *out)
+{
+	__uint128_t scaled;
+	__uint128_t result;
+
+	if (!out || denominator == 0)
+		return false;
+	scaled = (__uint128_t)value * numerator * 1000000U;
+	result = scaled / denominator;
+	if (result > (__uint128_t)INT64_MAX)
+		return false;
+	*out = (int64_t)result;
+	return true;
+}
+
 static bool pts_to_us(const MeNormalizedObservation *observation,
 			     int64_t *out)
 {
-	long double value;
-
 	if (!observation || !out || !observation->source_pts_valid ||
 	    observation->source_pts < 0 || observation->source_timebase.num == 0 ||
 	    observation->source_timebase.den == 0)
 		return false;
-	value = (long double)observation->source_pts *
-		(long double)observation->source_timebase.num * 1000000.0L /
-		(long double)observation->source_timebase.den;
-	if (value < 0.0L || value > (long double)INT64_MAX)
-		return false;
-	*out = (int64_t)value;
-	return true;
+	return scale_to_us((uint64_t)observation->source_pts,
+				   observation->source_timebase.num,
+				   observation->source_timebase.den, out);
 }
 
 /* This timeline is only for local durations. Alarm event_time_us remains the
@@ -87,13 +100,9 @@ static MeTimeline observation_timeline(const MeEventEngine *engine,
 	}
 	if (engine && engine->config.fps > 0 && observation &&
 	    observation->frame_id > 0) {
-		long double value =
-			(long double)(observation->frame_id - 1) * 1000000.0L /
-			(long double)engine->config.fps;
-		if (value >= 0.0L && value <= (long double)INT64_MAX) {
-			timeline.us = (int64_t)value;
+		if (scale_to_us(observation->frame_id - 1, 1,
+				(uint64_t)engine->config.fps, &timeline.us))
 			timeline.valid = true;
-		}
 	}
 	return timeline;
 }
@@ -138,12 +147,12 @@ static int emit_event(MeEventEngine *engine, const MeAnalyticsEvent *event)
 	return 1;
 }
 
-static void increment_event_seq(MeAnalyticsEvent *event)
+static bool increment_event_seq(MeAnalyticsEvent *event)
 {
-	if (event->event_seq == UINT64_MAX)
-		event->event_seq = 1;
-	else
-		event->event_seq++;
+	if (!event || event->event_seq == UINT64_MAX)
+		return false;
+	event->event_seq++;
+	return true;
 }
 
 static void event_copy_observation_context(
@@ -204,8 +213,6 @@ static void clear_pending(MeEventEngine *engine)
 	clear_trigger_candidate(engine);
 	engine->absent_since_us = 0;
 	engine->absent_since_valid = false;
-	engine->last_rule_trigger_us = 0;
-	engine->last_rule_trigger_valid = false;
 	engine->update_pending = false;
 	engine->pending_person_count = 0;
 	engine->pending_delta_in = 0;
@@ -222,15 +229,99 @@ static void clear_tracks(MeEventEngine *engine)
 	memset(engine->tracks, 0, sizeof(engine->tracks));
 }
 
+static void clear_rule_fact_states(MeEventEngine *engine)
+{
+	memset(engine->rule_fact_states, 0, sizeof(engine->rule_fact_states));
+}
+
+static int find_rule_fact_state(const MeEventEngine *engine, uint64_t track_id)
+{
+	uint32_t i;
+
+	for (i = 0; i < ME_ANALYTICS_MAX_TRACKS; i++) {
+		if (engine->rule_fact_states[i].in_use &&
+		    engine->rule_fact_states[i].track_id == track_id)
+			return (int)i;
+	}
+	return -1;
+}
+
+static int allocate_rule_fact_state(MeEventEngine *engine, uint64_t track_id)
+{
+	uint32_t i;
+
+	for (i = 0; i < ME_ANALYTICS_MAX_TRACKS; i++) {
+		if (!engine->rule_fact_states[i].in_use) {
+			memset(&engine->rule_fact_states[i], 0,
+			       sizeof(engine->rule_fact_states[i]));
+			engine->rule_fact_states[i].in_use = true;
+			engine->rule_fact_states[i].track_id = track_id;
+			return (int)i;
+		}
+	}
+	return -1;
+}
+
+static bool rule_fact_seen(const MeEventEngine *engine,
+				   const MeRuleFact *fact)
+{
+	int slot;
+
+	if (!engine || !fact || fact->direction > ME_RULE_DIRECTION_OUT)
+		return false;
+	slot = find_rule_fact_state(engine, fact->track_id);
+	return slot >= 0 &&
+	       engine->rule_fact_states[slot].direction_present[fact->direction];
+}
+
+static bool remember_rule_fact(MeEventEngine *engine, const MeRuleFact *fact)
+{
+	int slot;
+
+	if (!engine || !fact || fact->direction > ME_RULE_DIRECTION_OUT)
+		return false;
+	slot = find_rule_fact_state(engine, fact->track_id);
+	if (slot < 0)
+		slot = allocate_rule_fact_state(engine, fact->track_id);
+	if (slot < 0)
+		return false;
+	engine->rule_fact_states[slot].direction_present[fact->direction] = true;
+	return true;
+}
+
+static bool remember_rule_facts(MeEventEngine *engine,
+					const MeRuleSummary *summary)
+{
+	uint32_t i;
+
+	/* Replace the previous observation's facts so a later reappearance is a
+	 * new directional occurrence instead of a permanently suppressed one. */
+	clear_rule_fact_states(engine);
+	for (i = 0; i < summary->fact_count; i++) {
+		if (!remember_rule_fact(engine, summary->facts[i]))
+			return false;
+	}
+	return true;
+}
+
 static void clear_runtime(MeEventEngine *engine)
 {
 	engine->active = false;
 	memset(&engine->active_event, 0, sizeof(engine->active_event));
 	engine->active_person_count = 0;
+	engine->latest_person_count = 0;
+	engine->latest_person_count_valid = false;
 	engine->cooldown_until_us = 0;
 	engine->cooldown_until_valid = false;
 	clear_pending(engine);
 	clear_tracks(engine);
+	clear_rule_fact_states(engine);
+}
+
+static uint32_t latest_person_count(const MeEventEngine *engine)
+{
+	return engine->latest_person_count_valid ? engine->latest_person_count
+							 : engine->active_person_count;
 }
 
 static int find_track(const MeEventEngine *engine, uint64_t track_id)
@@ -432,6 +523,23 @@ static void summary_add_track(MeRuleSummary *summary, uint64_t track_id)
 	summary->track_ids[summary->track_count++] = track_id;
 }
 
+static bool summary_has_fact(const MeRuleSummary *summary,
+				     const MeRuleFact *fact)
+{
+	uint32_t i;
+
+	for (i = 0; i < summary->fact_count; i++) {
+		const MeRuleFact *previous = summary->facts[i];
+
+		if (previous->rule_type == fact->rule_type &&
+		    previous->direction == fact->direction &&
+		    previous->track_id == fact->track_id &&
+		    !strcmp(previous->rule_id, fact->rule_id))
+			return true;
+	}
+	return false;
+}
+
 static void matching_rules(const MeEventEngine *engine,
 				   const MeNormalizedObservation *observation,
 				   MeRuleSummary *summary)
@@ -447,15 +555,23 @@ static void matching_rules(const MeEventEngine *engine,
 		if (rule->rule_type == engine->config.rule_type &&
 		    !strcmp(rule->rule_id, engine->config.rule_id) &&
 		    rule->score_q >= engine->config.score_threshold_q) {
+			if (summary_has_fact(summary, rule))
+				continue;
+			if (summary->fact_count < ME_ANALYTICS_MAX_RULE_FACTS)
+				summary->facts[summary->fact_count++] = rule;
 			if (!summary->first)
 				summary->first = rule;
 			if (summary->match_count < UINT32_MAX)
 				summary->match_count++;
-			if (rule->direction == ME_RULE_DIRECTION_IN)
-				saturating_add_u32(&summary->delta_in, 1);
-			else if (rule->direction == ME_RULE_DIRECTION_OUT)
-				saturating_add_u32(&summary->delta_out, 1);
-			summary_add_track(summary, rule->track_id);
+			if (!rule_fact_seen(engine, rule)) {
+				if (summary->new_match_count < UINT32_MAX)
+					summary->new_match_count++;
+				if (rule->direction == ME_RULE_DIRECTION_IN)
+					saturating_add_u32(&summary->delta_in, 1);
+				else if (rule->direction == ME_RULE_DIRECTION_OUT)
+					saturating_add_u32(&summary->delta_out, 1);
+				summary_add_track(summary, rule->track_id);
+			}
 		}
 	}
 }
@@ -469,32 +585,40 @@ static bool cooldown_elapsed(const MeEventEngine *engine, MeTimeline now)
 	return now.us >= engine->cooldown_until_us;
 }
 
-static void new_event_id(MeEventEngine *engine, const char *channel_id,
+static bool new_event_id(MeEventEngine *engine, const char *channel_id,
 				 uint64_t stream_epoch, char *out, size_t outsz)
 {
 	uint64_t serial;
+	int written;
 
-	if (engine->next_event_serial == UINT64_MAX)
-		engine->next_event_serial = 1;
-	else
-		engine->next_event_serial++;
-	serial = engine->next_event_serial;
-	snprintf(out, outsz, "me-%016llx-%016llx-%016llx",
-		 (unsigned long long)channel_hash(channel_id),
-		 (unsigned long long)stream_epoch, (unsigned long long)serial);
+	if (!engine || !channel_id || !out || outsz == 0 ||
+	    engine->next_event_serial == UINT64_MAX)
+		return false;
+	serial = engine->next_event_serial + 1;
+	written = snprintf(out, outsz, "me-%016llx-%016llx-%016llx",
+			   (unsigned long long)channel_hash(channel_id),
+			   (unsigned long long)stream_epoch,
+			   (unsigned long long)serial);
+	if (written < 0 || (size_t)written >= outsz)
+		return false;
+	engine->next_event_serial = serial;
+	return true;
 }
 
 static int emit_start(MeEventEngine *engine,
 			      const MeNormalizedObservation *observation,
 			      const MeRuleSummary *summary, uint32_t person_count,
-			      MeTimeline now)
+			      MeTimeline now, char *err, size_t errsz)
 {
 	MeAnalyticsEvent *event = &engine->active_event;
 
 	memset(event, 0, sizeof(*event));
 	event->contract_version = ME_ANALYTICS_EVENT_CONTRACT_VERSION;
-	new_event_id(engine, observation->channel_id, observation->stream_epoch,
-		     event->event_id, sizeof(event->event_id));
+	if (!new_event_id(engine, observation->channel_id, observation->stream_epoch,
+			  event->event_id, sizeof(event->event_id))) {
+		event_set_err(err, errsz, "analytics event id serial is exhausted");
+		return -1;
+	}
 	event->event_type = engine->config.rule_type;
 	snprintf(event->rule_id, sizeof(event->rule_id), "%s",
 		 engine->config.rule_id);
@@ -511,6 +635,10 @@ static int emit_start(MeEventEngine *engine,
 	if (summary)
 		event_copy_responsible_tracks(event, summary->track_ids,
 					       summary->track_count);
+	if (summary && !remember_rule_facts(engine, summary)) {
+		event_set_err(err, errsz, "analytics rule fact state is exhausted");
+		return -1;
+	}
 	engine->active = true;
 	engine->active_person_count = person_count;
 	engine->last_emit_timeline_us = now.us;
@@ -553,7 +681,8 @@ static void mark_update(MeEventEngine *engine, uint32_t person_count,
 
 static int maybe_emit_update(MeEventEngine *engine,
 				     const MeNormalizedObservation *observation,
-				     uint32_t person_count, MeTimeline now)
+				     uint32_t person_count, MeTimeline now,
+				     char *err, size_t errsz)
 {
 	MeAnalyticsEvent *event = &engine->active_event;
 
@@ -563,7 +692,10 @@ static int maybe_emit_update(MeEventEngine *engine,
 	    !elapsed_at_least(now, engine->last_emit_timeline_us, true,
 			       (uint64_t)engine->config.update_interval_ms * 1000ULL))
 		return 0;
-	increment_event_seq(event);
+	if (!increment_event_seq(event)) {
+		event_set_err(err, errsz, "analytics event sequence is exhausted");
+		return -1;
+	}
 	event->phase = ME_EVENT_PHASE_UPDATE;
 	event->reason = engine->pending_reason;
 	event_copy_observation_context(event, observation, person_count,
@@ -585,7 +717,7 @@ static int maybe_emit_update(MeEventEngine *engine,
 static int emit_end(MeEventEngine *engine,
 			    const MeNormalizedObservation *observation,
 			    MeEventReason reason, uint32_t person_count, MeTimeline now,
-			    bool apply_cooldown)
+			    bool apply_cooldown, char *err, size_t errsz)
 {
 	MeAnalyticsEvent *event = &engine->active_event;
 	uint32_t delta_in = engine->pending_delta_in;
@@ -594,7 +726,10 @@ static int emit_end(MeEventEngine *engine,
 
 	if (!engine->active)
 		return 0;
-	increment_event_seq(event);
+	if (!increment_event_seq(event)) {
+		event_set_err(err, errsz, "analytics event sequence is exhausted");
+		return -1;
+	}
 	event->phase = ME_EVENT_PHASE_END;
 	event->reason = reason;
 	event_copy_observation_context(event, observation, person_count, delta_in,
@@ -611,6 +746,7 @@ static int emit_end(MeEventEngine *engine,
 	engine->active = false;
 	engine->active_person_count = 0;
 	clear_pending(engine);
+	clear_rule_fact_states(engine);
 	return emitted;
 }
 
@@ -652,22 +788,9 @@ static bool trigger_qualified(const MeEventEngine *engine, MeTimeline now)
 	       !now.valid;
 }
 
-static bool rule_trigger_accepted(MeEventEngine *engine, MeTimeline now)
-{
-	uint64_t debounce_us = (uint64_t)engine->config.debounce_ms * 1000ULL;
-
-	if (!engine->last_rule_trigger_valid || !now.valid || debounce_us == 0 ||
-	    now.us < engine->last_rule_trigger_us ||
-	    (uint64_t)(now.us - engine->last_rule_trigger_us) >= debounce_us) {
-		engine->last_rule_trigger_us = now.us;
-		engine->last_rule_trigger_valid = now.valid;
-		return true;
-	}
-	return false;
-}
-
 static int process_accepted(MeEventEngine *engine,
-				    const MeNormalizedObservation *observation)
+				    const MeNormalizedObservation *observation,
+				    char *err, size_t errsz)
 {
 	MeTimeline now = observation_timeline(engine, observation);
 	MeRuleSummary summary;
@@ -676,28 +799,37 @@ static int process_accepted(MeEventEngine *engine,
 	int emitted = 0;
 
 	if (!engine->config.enabled) {
+		engine->latest_person_count = 0;
+		engine->latest_person_count_valid = true;
 		clear_tracks(engine);
 		clear_pending(engine);
 		return 0;
 	}
 
 	person_count = update_tracks(engine, observation, now);
+	engine->latest_person_count = person_count;
+	engine->latest_person_count_valid = true;
 	matching_rules(engine, observation, &summary);
 	condition = engine->config.rule_type == ME_RULE_TYPE_OCCUPANCY
 			    ? person_count > 0
 			    : summary.match_count > 0;
+	if (engine->active && engine->config.rule_type != ME_RULE_TYPE_OCCUPANCY &&
+	    !remember_rule_facts(engine, &summary)) {
+		event_set_err(err, errsz, "analytics rule fact state is exhausted");
+		return -1;
+	}
 
 	if (!engine->active) {
 		update_trigger_candidate(engine, condition, now);
 		if (trigger_qualified(engine, now)) {
-			emitted += emit_start(engine, observation, &summary, person_count,
-					      now);
+			int started = emit_start(engine, observation, &summary, person_count,
+						 now, err, errsz);
+
+			if (started < 0)
+				return -1;
+			emitted += started;
 			clear_trigger_candidate(engine);
 			engine->absent_since_valid = false;
-			if (summary.first) {
-				engine->last_rule_trigger_us = now.us;
-				engine->last_rule_trigger_valid = now.valid;
-			}
 		}
 		return emitted;
 	}
@@ -712,10 +844,15 @@ static int process_accepted(MeEventEngine *engine,
 		}
 		if (absence_us == 0 ||
 		    elapsed_at_least(now, engine->absent_since_us,
-				     engine->absent_since_valid, absence_us))
-			emitted += emit_end(engine, observation,
-					    ME_EVENT_REASON_DISAPPEARED, person_count, now,
-					    true);
+				     engine->absent_since_valid, absence_us)) {
+			int ended = emit_end(engine, observation,
+					     ME_EVENT_REASON_DISAPPEARED, person_count, now,
+					     true, err, errsz);
+
+			if (ended < 0)
+				return -1;
+			emitted += ended;
+		}
 		return emitted;
 	}
 
@@ -724,12 +861,13 @@ static int process_accepted(MeEventEngine *engine,
 		if (person_count != engine->active_person_count)
 			mark_update(engine, person_count, 0, 0, NULL, 0,
 				    ME_EVENT_REASON_COUNT_CHANGED);
-	} else if (summary.first && rule_trigger_accepted(engine, now)) {
+	} else if (summary.new_match_count > 0) {
 		mark_update(engine, person_count, summary.delta_in, summary.delta_out,
 				 summary.track_ids, summary.track_count,
 				    ME_EVENT_REASON_DIRECTION);
 	}
-	emitted += maybe_emit_update(engine, observation, person_count, now);
+	emitted += maybe_emit_update(engine, observation, person_count, now, err,
+				     errsz);
 	return emitted;
 }
 
@@ -753,10 +891,26 @@ int me_event_engine_init(MeEventEngine *engine,
 	return 0;
 }
 
-void me_event_engine_deinit(MeEventEngine *engine)
+int me_event_engine_deinit(MeEventEngine *engine, char *err, size_t errsz)
 {
-	if (engine)
-		memset(engine, 0, sizeof(*engine));
+	int emitted = 0;
+
+	if (!engine) {
+		event_set_err(err, errsz, "event engine is required");
+		return -1;
+	}
+	if (engine->active && engine->have_last_observation) {
+		emitted = emit_end(engine, &engine->last_observation,
+					ME_EVENT_REASON_PROCESS_RESTART,
+					latest_person_count(engine),
+					observation_timeline(engine,
+							     &engine->last_observation),
+					false, err, errsz);
+		if (emitted < 0)
+			return -1;
+	}
+	memset(engine, 0, sizeof(*engine));
+	return emitted;
 }
 
 int me_event_engine_process(MeEventEngine *engine,
@@ -764,7 +918,10 @@ int me_event_engine_process(MeEventEngine *engine,
 				    char *err, size_t errsz)
 {
 	MeObservationOrderResult order_result;
+	MeObservationOrder next_order;
 	int emitted = 0;
+	int ended;
+	int accepted;
 
 	if (!engine || !observation) {
 		event_set_err(err, errsz, "event engine and observation are required");
@@ -774,20 +931,25 @@ int me_event_engine_process(MeEventEngine *engine,
 		return -1;
 	if (engine->have_stream &&
 	    strcmp(engine->channel_id, observation->channel_id) != 0) {
-		if (engine->active && engine->have_last_observation)
-			emitted += emit_end(engine, &engine->last_observation,
-					    ME_EVENT_REASON_STREAM_RESET,
-					    engine->active_person_count,
-					    observation_timeline(engine,
-								 &engine->last_observation),
-					    false);
+		if (engine->active && engine->have_last_observation) {
+			ended = emit_end(engine, &engine->last_observation,
+					 ME_EVENT_REASON_STREAM_RESET,
+					 latest_person_count(engine),
+					 observation_timeline(engine,
+							     &engine->last_observation),
+					 false, err, errsz);
+			if (ended < 0)
+				return -1;
+			emitted += ended;
+		}
 		clear_runtime(engine);
 		engine->have_stream = false;
 		me_observation_order_init(&engine->order);
 	}
 
+	next_order = engine->order;
 	order_result =
-		me_observation_order_classify(&engine->order, observation);
+		me_observation_order_classify(&next_order, observation);
 	if (order_result == ME_OBSERVATION_ORDER_INVALID) {
 		event_set_err(err, errsz, "observation ordering input is invalid");
 		return -1;
@@ -796,22 +958,30 @@ int me_event_engine_process(MeEventEngine *engine,
 	    order_result == ME_OBSERVATION_ORDER_OUT_OF_ORDER)
 		return emitted;
 	if (order_result == ME_OBSERVATION_ORDER_EPOCH_ADVANCE) {
-		if (engine->active && engine->have_last_observation)
-			emitted += emit_end(engine, &engine->last_observation,
-					    ME_EVENT_REASON_STREAM_RESET,
-					    engine->active_person_count,
-					    observation_timeline(engine,
-								 &engine->last_observation),
-					    false);
-		clear_runtime(engine);
-	}
+		if (engine->active && engine->have_last_observation) {
+			ended = emit_end(engine, &engine->last_observation,
+					 ME_EVENT_REASON_STREAM_RESET,
+					 latest_person_count(engine),
+					 observation_timeline(engine,
+							     &engine->last_observation),
+					 false, err, errsz);
+				if (ended < 0)
+					return -1;
+				emitted += ended;
+			}
+			clear_runtime(engine);
+		}
+	engine->order = next_order;
 	engine->have_stream = true;
 	snprintf(engine->channel_id, sizeof(engine->channel_id), "%s",
 		 observation->channel_id);
 	engine->stream_epoch = observation->stream_epoch;
 	engine->last_observation = *observation;
 	engine->have_last_observation = true;
-	return emitted + process_accepted(engine, observation);
+	accepted = process_accepted(engine, observation, err, errsz);
+	if (accepted < 0)
+		return -1;
+	return emitted + accepted;
 }
 
 int me_event_engine_close(MeEventEngine *engine, MeEventReason reason,
@@ -823,11 +993,14 @@ int me_event_engine_close(MeEventEngine *engine, MeEventReason reason,
 		event_set_err(err, errsz, "invalid event engine close reason");
 		return -1;
 	}
-	if (engine->active && engine->have_last_observation)
+	if (engine->active && engine->have_last_observation) {
 		emitted = emit_end(engine, &engine->last_observation, reason,
-				   engine->active_person_count, observation_timeline(engine,
+				   latest_person_count(engine), observation_timeline(engine,
 							    &engine->last_observation),
-				   false);
+				   false, err, errsz);
+		if (emitted < 0)
+			return -1;
+	}
 	clear_runtime(engine);
 	return emitted;
 }
@@ -847,20 +1020,35 @@ int me_event_engine_reconfigure(MeEventEngine *engine,
 	}
 	if (me_analytics_config_validate(config, err, errsz) != 0)
 		return -1;
+	if (config_version != 0) {
+		if (config_version <= engine->config_version) {
+			event_set_err(err, errsz,
+				      "analytics config version must increase");
+			return -1;
+		}
+		next_version = config_version;
+	} else {
+		if (engine->config_version == UINT64_MAX) {
+			event_set_err(err, errsz,
+				      "analytics config version is exhausted");
+			return -1;
+		}
+		next_version = engine->config_version + 1;
+	}
 	reason = config->enabled ? ME_EVENT_REASON_RECONFIGURED
 				 : ME_EVENT_REASON_ANALYTICS_DISABLED;
-	if (engine->active && engine->have_last_observation)
+	if (engine->active && engine->have_last_observation) {
 		emitted = emit_end(engine, &engine->last_observation, reason,
-					engine->active_person_count,
+					latest_person_count(engine),
 					observation_timeline(engine,
 							     &engine->last_observation),
-					false);
+					false, err, errsz);
+		if (emitted < 0)
+			return -1;
+	}
 	clear_runtime(engine);
-	next_version = engine->config_version == UINT64_MAX
-				? 1
-				: engine->config_version + 1;
 	engine->config = *config;
-	engine->config_version = config_version ? config_version : next_version;
+	engine->config_version = next_version;
 	return emitted;
 }
 

@@ -81,6 +81,15 @@ typedef struct {
 } MeEventTrackState;
 
 typedef struct {
+	bool in_use;
+	uint64_t track_id;
+	/* A fact is deduplicated only while it is present in consecutive accepted
+	 * observations. A zero track_id remains a rule-level fact, not an identity.
+	 */
+	bool direction_present[ME_RULE_DIRECTION_OUT + 1];
+} MeEventRuleFactState;
+
+typedef struct {
 	MeAnalyticsConfig config;
 	uint64_t config_version;
 	MeObservationOrder order;
@@ -91,17 +100,18 @@ typedef struct {
 	bool have_last_observation;
 
 	MeEventTrackState tracks[ME_ANALYTICS_MAX_TRACKS];
+	MeEventRuleFactState rule_fact_states[ME_ANALYTICS_MAX_TRACKS];
 	bool active;
 	MeAnalyticsEvent active_event;
 	uint32_t active_person_count;
+	uint32_t latest_person_count;
+	bool latest_person_count_valid;
 	bool trigger_pending;
 	uint32_t trigger_frames;
 	int64_t trigger_since_us;
 	bool trigger_since_valid;
 	int64_t absent_since_us;
 	bool absent_since_valid;
-	int64_t last_rule_trigger_us;
-	bool last_rule_trigger_valid;
 	bool update_pending;
 	uint32_t pending_person_count;
 	uint32_t pending_delta_in;
@@ -124,7 +134,10 @@ int me_event_engine_init(MeEventEngine *engine,
 				uint64_t config_version, MeAnalyticsEventSink sink,
 				void *sink_userdata, char *err, size_t errsz);
 
-void me_event_engine_deinit(MeEventEngine *engine);
+/* Emits PROCESS_RESTART/END for an active event before clearing the engine.
+ * Returns the number of emitted records, or -1 if the final sequence cannot
+ * be represented. */
+int me_event_engine_deinit(MeEventEngine *engine, char *err, size_t errsz);
 
 /* Processes one accepted observation. Returns the number of emitted records,
  * zero for duplicate/old observations, or -1 for invalid arguments/data.

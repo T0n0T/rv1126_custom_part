@@ -88,7 +88,8 @@ CPU-NV12 探针、隔离 V4L2 DMA-BUF 生命周期与停止/重启结果、PFP/C
 - [x] 不宣称跨摄像机或全局唯一人数。
 
 证据：`make -C media_engine/tests clean && make -C media_engine/tests`；事件引擎测试
-通过。此项为无 NPU 的主机确定性验证，不替代 T1/T3 真板分析分支验收。
+T4 tests passed. T4 review: Standards/Spec passed. Host-side deterministic validation only; it
+does not replace T1/T3 board analysis acceptance.
 
 ## T5 证据与持久桥
 

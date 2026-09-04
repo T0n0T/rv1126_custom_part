@@ -179,6 +179,13 @@ UAF/泄漏、主路径 sequence 和编码连续性仍未验证。另一次 GStre
 进程重启收尾和配置重置，并验证越线责任轨迹和 ROI 边界迟滞。观察结果契约版本
 从 1 递增到 2 以承载可选责任 `track_id`。尚未接入 RockIVA、证据缓存或 daemon 投递。
 
+T4 review: Standards/Spec passed after lifecycle, latest-count, config-version,
+direction-fact, overflow, and epoch-order boundary tests. Direction facts are
+deduplicated only while present in consecutive accepted observations; rule-level
+facts retain no target identity. Scope is host-side deterministic event-engine
+validation only; callback ownership, durable retries, and the RockIVA/T3 board
+path remain downstream acceptance items.
+
 ### T5 — 证据缓存与持久事件桥
 
 **What to build:** 将事件及其精确或近似证据写入可恢复的本地链路，支持长连接订阅、确认和断线重放。
