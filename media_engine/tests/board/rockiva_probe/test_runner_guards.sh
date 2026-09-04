@@ -66,6 +66,7 @@ make_fake_probe()
 		'  for arg do printf "arg=%s\\n" "$arg"; done' \
 		'  printf "LD_LIBRARY_PATH=%s\\n" "${LD_LIBRARY_PATH-}"' \
 		'  printf "GST_PLUGIN_PATH=%s\\n" "${GST_PLUGIN_PATH-}"' \
+		'  printf "GST_PLUGIN_SCANNER=%s\\n" "${GST_PLUGIN_SCANNER-}"' \
 		'} > "${TRACE_FILE:?TRACE_FILE must be set}"' \
 		>"$target"
 	chmod 755 "$target"
@@ -153,6 +154,35 @@ expect_contains dmabuf-safe-device 'arg=/tmp/selfpath' "$DMABUF_TRACE"
 expect_contains dmabuf-plugin-path \
 	'GST_PLUGIN_PATH=/opt/rockiva/gstreamer-1.0' "$DMABUF_TRACE"
 
+MP4_TRACE=$TMP_DIR/mp4.trace
+env -i PATH="$PATH_VALUE" TRACE_FILE="$MP4_TRACE" \
+	SOURCE=mp4 INPUT=/tmp/me/real_time.mp4 MODEL_PATH=/tmp/model \
+	ROCKIVA_LIB_DIR=/opt/rockiva WIDTH=640 HEIGHT=640 FRAMES=4 FPS=10 \
+	sh "$ROCKIVA_DIR/run_v4l2_rockiva_probe.sh"
+expect_contains v4l2-rockiva-mp4-input 'arg=/tmp/me/real_time.mp4' "$MP4_TRACE"
+expect_contains v4l2-rockiva-mp4-fps 'arg=10' "$MP4_TRACE"
+expect_absent v4l2-rockiva-mp4-no-device 'arg=--device' "$MP4_TRACE"
+expect_contains v4l2-rockiva-mp4-plugin-path \
+	'GST_PLUGIN_PATH=/opt/rockiva/gstreamer-1.0' "$MP4_TRACE"
+expect_contains v4l2-rockiva-mp4-plugin-scanner \
+	'GST_PLUGIN_SCANNER=/oem/usr/libexec/gstreamer-1.0/gst-plugin-scanner' \
+	"$MP4_TRACE"
+expect_contains v4l2-rockiva-mp4-display-default 'arg=--display' "$MP4_TRACE"
+
+MP4_NO_DISPLAY_TRACE=$TMP_DIR/mp4-no-display.trace
+env -i PATH="$PATH_VALUE" TRACE_FILE="$MP4_NO_DISPLAY_TRACE" \
+	SOURCE=mp4 INPUT=/tmp/me/real_time.mp4 MODEL_PATH=/tmp/model \
+	ROCKIVA_LIB_DIR=/opt/rockiva WIDTH=640 HEIGHT=640 FRAMES=4 FPS=10 \
+	DISPLAY_OUTPUT=0 sh "$ROCKIVA_DIR/run_v4l2_rockiva_probe.sh"
+expect_contains v4l2-rockiva-mp4-no-display 'arg=--no-display' "$MP4_NO_DISPLAY_TRACE"
+expect_absent v4l2-rockiva-mp4-no-display-not-enabled 'arg=--display' \
+	"$MP4_NO_DISPLAY_TRACE"
+
+expect_failure_contains v4l2-rockiva-mp4-continuous-forbidden \
+	'CONTINUOUS is only supported with SOURCE=v4l2' \
+	env -i PATH="$PATH_VALUE" SOURCE=mp4 MODEL_PATH=/tmp/model \
+	CONTINUOUS=1 sh "$ROCKIVA_DIR/run_v4l2_rockiva_probe.sh"
+
 EXPBUF_MAINPATH_TRACE=$TMP_DIR/expbuf-mainpath.trace
 env -i PATH="$PATH_VALUE" TRACE_FILE="$EXPBUF_MAINPATH_TRACE" \
 	DEVICE=/dev/video24 WIDTH=640 HEIGHT=360 FRAMES=4 ALLOW_MAINPATH=1 \
@@ -202,5 +232,18 @@ expect_contains v4l2-rockiva-person-event-object-frame-id \
 expect_contains v4l2-rockiva-person-event-result-frame-id \
 	'print_person_event(&result->objInfo[i], result->frameId' \
 	"$SCRIPT_DIR/v4l2_rockiva_probe.c"
+expect_contains v4l2-rockiva-mp4-mpp-decoder \
+	'gst_element_factory_make("mppvideodec"' "$SCRIPT_DIR/v4l2_rockiva_probe.c"
+expect_contains v4l2-rockiva-mp4-display-tee \
+	'gst_element_factory_make("tee", "mp4-tee")' "$SCRIPT_DIR/v4l2_rockiva_probe.c"
+expect_contains v4l2-rockiva-mp4-display-rga \
+	'me_rga_rotate_register()' "$SCRIPT_DIR/v4l2_rockiva_probe.c"
+expect_contains v4l2-rockiva-mp4-display-kms \
+	'gst_element_factory_make("kmssink", "mp4-display-sink")' \
+	"$SCRIPT_DIR/v4l2_rockiva_probe.c"
+expect_contains v4l2-rockiva-mp4-push-frame \
+	'ROCKIVA_PushFrame(handle, &image' "$SCRIPT_DIR/v4l2_rockiva_probe.c"
+expect_contains v4l2-rockiva-mp4-cpu-buffer \
+	'fd_lifecycle=cpu-buffer' "$SCRIPT_DIR/v4l2_rockiva_probe.c"
 
 printf '%s\n' '[PASS] runner guard checks complete without opening a V4L2 device'

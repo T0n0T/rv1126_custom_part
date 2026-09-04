@@ -132,11 +132,10 @@ static GstCaps *me_rga_rotate_transform_caps(GstBaseTransform *trans,
 	GstCaps *tmp = gst_caps_copy(caps);
 	guint i;
 
-	(void)direction;
-
-	/* Only the sink->src direction transforms dimensions; the reverse
-	 * query (what can the sink accept for a given src caps) keeps the
-	 * template so upstream fixed caps negotiate normally. */
+	/* The sink->src query describes the configured output dimensions. In the
+	 * reverse direction a configured scaler accepts input dimensions that are
+	 * independent of those output dimensions; retaining the fixed output size
+	 * here makes a fixed upstream caps filter intersect to EMPTY. */
 	if (direction == GST_PAD_SINK && self->out_width && self->out_height) {
 		for (i = 0; i < gst_caps_get_size(tmp); i++) {
 			GstStructure *s = gst_caps_get_structure(tmp, i);
@@ -156,6 +155,15 @@ static GstCaps *me_rga_rotate_transform_caps(GstBaseTransform *trans,
 			    gst_structure_get_int(s, "height", &h))
 				gst_structure_set(s, "width", G_TYPE_INT, h,
 				                  "height", G_TYPE_INT, w, NULL);
+		}
+	} else if (direction == GST_PAD_SRC && self->out_width &&
+	           self->out_height) {
+		for (i = 0; i < gst_caps_get_size(tmp); i++) {
+			GstStructure *s = gst_caps_get_structure(tmp, i);
+
+			gst_structure_set(s, "width", GST_TYPE_INT_RANGE, 1, G_MAXINT,
+			                  "height", GST_TYPE_INT_RANGE, 1, G_MAXINT,
+			                  NULL);
 		}
 	}
 
@@ -257,9 +265,14 @@ static gboolean me_rga_rotate_propose_allocation(GstBaseTransform *trans,
 	if (gst_query_get_n_allocation_pools(query) == 0) {
 		/* Prefer dmabuf so kmssink gets a zero-copy framebuffer; fall back
 		 * to whatever the downstream/upstream chain suggested. */
-		if (gst_query_get_n_allocation_params(query) > 0)
-			gst_query_parse_nth_allocation_param(query, 0, &allocator,
+		if (gst_query_get_n_allocation_params(query) > 0) {
+			GstAllocator *suggested = NULL;
+
+			gst_query_parse_nth_allocation_param(query, 0, &suggested,
 			                                     &params);
+			if (suggested)
+				allocator = GST_ALLOCATOR(gst_object_ref(suggested));
+		}
 		if (allocator == NULL)
 			allocator = gst_allocator_find("dmabuf");
 		if (allocator == NULL)
@@ -269,7 +282,6 @@ static gboolean me_rga_rotate_propose_allocation(GstBaseTransform *trans,
 			gst_query_add_allocation_param(query, NULL, &params);
 		} else {
 			gst_query_add_allocation_param(query, allocator, &params);
-			gst_object_unref(allocator);
 		}
 
 		pool = gst_video_buffer_pool_new();
@@ -286,11 +298,15 @@ static gboolean me_rga_rotate_propose_allocation(GstBaseTransform *trans,
 		gst_buffer_pool_config_set_video_alignment(config, &align);
 		if (!gst_buffer_pool_set_config(pool, config)) {
 			GST_ERROR_OBJECT(trans, "failed to configure output pool");
+			if (allocator)
+				gst_object_unref(allocator);
 			gst_object_unref(pool);
 			return FALSE;
 		}
 		gst_query_add_allocation_pool(query, pool, size, 0, 0);
 		gst_query_add_allocation_meta(query, GST_VIDEO_META_API_TYPE, NULL);
+		if (allocator)
+			gst_object_unref(allocator);
 		gst_object_unref(pool);
 	}
 	return TRUE;
@@ -371,6 +387,7 @@ static GstFlowReturn me_rga_rotate_transform(GstBaseTransform *trans,
 
 	if (!self->rga_ready) {
 		if (c_RkRgaInit() < 0) {
+			g_printerr("rgarotate: RGA init failed\n");
 			GST_ERROR_OBJECT(self, "RGA init failed");
 			return GST_FLOW_ERROR;
 		}
@@ -383,6 +400,8 @@ static GstFlowReturn me_rga_rotate_transform(GstBaseTransform *trans,
 	out_h = GST_VIDEO_INFO_HEIGHT(&self->out_info);
 	if (in_w <= 0 || in_h <= 0 || out_w <= 0 || out_h <= 0 ||
 	    (in_w & 1) || (in_h & 1) || (out_w & 1) || (out_h & 1)) {
+		g_printerr("rgarotate: invalid NV12 dimensions %dx%d -> %dx%d\n",
+		           in_w, in_h, out_w, out_h);
 		GST_ERROR_OBJECT(self, "RGA NV12 requires even dimensions "
 		                       "(%dx%d -> %dx%d)",
 		                 in_w, in_h, out_w, out_h);
@@ -402,6 +421,8 @@ static GstFlowReturn me_rga_rotate_transform(GstBaseTransform *trans,
 	                  ? (gint)(out_meta->offset[1] / (guint)out_wstride)
 	                  : out_h;
 	if (in_hstride <= 0 || out_hstride <= 0) {
+		g_printerr("rgarotate: invalid stride in=%dx%d out=%dx%d\n",
+		           in_wstride, in_hstride, out_wstride, out_hstride);
 		GST_ERROR_OBJECT(self, "invalid stride (in %dx%d, out %dx%d)",
 		                 in_wstride, in_hstride, out_wstride, out_hstride);
 		return GST_FLOW_ERROR;
@@ -409,6 +430,7 @@ static GstFlowReturn me_rga_rotate_transform(GstBaseTransform *trans,
 
 	rga_rotation = me_rga_rotation_to_rga(self->rotation);
 	if (rga_rotation < 0) {
+		g_printerr("rgarotate: unsupported rotation %d\n", self->rotation);
 		GST_ERROR_OBJECT(self, "unsupported rotation %d", self->rotation);
 		return GST_FLOW_ERROR;
 	}
@@ -420,6 +442,7 @@ static GstFlowReturn me_rga_rotate_transform(GstBaseTransform *trans,
 	}
 	if (src.fd <= 0) {
 		if (!gst_buffer_map(inbuf, &in_map, GST_MAP_READ)) {
+			g_printerr("rgarotate: cannot map input buffer\n");
 			GST_ERROR_OBJECT(self, "cannot map input buffer");
 			return GST_FLOW_ERROR;
 		}
@@ -435,6 +458,7 @@ static GstFlowReturn me_rga_rotate_transform(GstBaseTransform *trans,
 		if (!gst_buffer_map(outbuf, &out_map, GST_MAP_WRITE)) {
 			if (in_map.data)
 				gst_buffer_unmap(inbuf, &in_map);
+			g_printerr("rgarotate: cannot map output buffer\n");
 			GST_ERROR_OBJECT(self, "cannot map output buffer");
 			return GST_FLOW_ERROR;
 		}
@@ -455,6 +479,10 @@ static GstFlowReturn me_rga_rotate_transform(GstBaseTransform *trans,
 	if (out_map.data)
 		gst_buffer_unmap(outbuf, &out_map);
 	if (ret < 0) {
+		g_printerr("rgarotate: RGA blit failed ret=%d in=%dx%d stride=%dx%d "
+		           "out=%dx%d stride=%dx%d rotation=%d src_fd=%d dst_fd=%d\n",
+		           ret, in_w, in_h, in_wstride, in_hstride, out_w, out_h,
+		           out_wstride, out_hstride, self->rotation, src.fd, dst.fd);
 		GST_ERROR_OBJECT(self, "RGA blit failed: %d", ret);
 		return GST_FLOW_ERROR;
 	}

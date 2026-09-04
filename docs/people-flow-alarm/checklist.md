@@ -34,6 +34,10 @@
       CPU 地址压力样本在板端完成 `60/60/60` push/detect/release，`person=770`、
       `tracking=425`；该结果只作为密集人群压力证据，不作为唯一人数或 DMA-BUF 生产
       验收。
+- [x] 2026-09-04 `SOURCE=mp4` 板端样本通过 `mppvideodec` 解码，并以显示开启的
+      `rgarotate ! kmssink` 分支完成 `30/30/30/30` capture/push/detect/release，
+      `person=143`、`tracking=83`；该结果只作为 CPU-NV12 测试源和显示管线候选证据，
+      未验证物理屏幕像素，也不替代生产 DMA-BUF 门禁。
 - [x] DMA-BUF 场景下 person 检出和 `objId/state` 变化已有一轮录制结果；2026-09-01
       原生 V4L2 60 帧运行为 `person=58 tracking=50`，并观察到
       `FIRST/TRACKING/LOST/DISPEAR`。这只是单轮候选证据，真实采集流纪元和长期稳定性

@@ -31,8 +31,14 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <gst/app/gstappsink.h>
+#include <gst/gst.h>
+#include <gst/video/video-frame.h>
+#include <gst/video/video.h>
+
 #include "rockiva/rockiva_common.h"
 #include "rockiva/rockiva_det_api.h"
+#include "gst/me_rga_rotate.h"
 #include "mainpath_guard.h"
 
 #define V4L2_CAPTURE_TYPE V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE
@@ -42,9 +48,15 @@
 #define DEFAULT_CORE_MASK 0U
 #define DEFAULT_BUFFERS 4U
 #define DEFAULT_TIMEOUT_MS 5000
+#define DEFAULT_FILE_FPS 10U
 #define DEFAULT_REPORT_INTERVAL_MS 5000U
 #define DEFAULT_MIN_PERSON_OBSERVATIONS 0U
 #define DEFAULT_MIN_TRACKING_OBSERVATIONS 0U
+#define DEFAULT_CONNECTOR_ID 97U
+#define DEFAULT_PLANE_ID 75U
+#define DEFAULT_PREVIEW_ROTATION 0U
+#define DEFAULT_PREVIEW_WIDTH 480U
+#define DEFAULT_PREVIEW_HEIGHT 800U
 #define MAX_QUEUE_BUFFERS 64U
 #define MAX_CAPTURE_FRAMES 10000U
 #define MAX_VERSION 128U
@@ -64,10 +76,12 @@ enum probe_output_class {
 
 struct probe_options {
 	const char *device;
+	const char *input_path;
 	const char *model_path;
 	unsigned int width;
 	unsigned int height;
 	unsigned int frames;
+	unsigned int fps;
 	unsigned int buffers;
 	unsigned int channel_id;
 	unsigned int core_mask;
@@ -76,9 +90,20 @@ struct probe_options {
 	unsigned int report_interval_ms;
 	unsigned int min_person_observations;
 	unsigned int min_tracking_observations;
+	unsigned int connector_id;
+	unsigned int plane_id;
+	unsigned int preview_rotation;
+	unsigned int preview_width;
+	unsigned int preview_height;
 	int allow_mainpath;
 	int continuous;
+	int display;
 	enum probe_log_level log_level;
+};
+
+enum probe_input_kind {
+	PROBE_INPUT_V4L2 = 0,
+	PROBE_INPUT_MP4,
 };
 
 struct capture_buffer {
@@ -104,6 +129,8 @@ struct probe_frame {
 	unsigned int buffer_index;
 	uint32_t sequence;
 	uint32_t bytesused;
+	uint8_t *cpu_buffer;
+	uint64_t source_pts_ns;
 	uint64_t submitted_ns;
 	enum frame_state state;
 	int push_returned;
@@ -124,6 +151,7 @@ struct probe_state {
 	pthread_mutex_t metrics_lock;
 	pthread_cond_t callbacks_cond;
 	int callbacks_cond_initialized;
+	enum probe_input_kind input_kind;
 	uint32_t channel_id;
 	struct capture_buffer *buffers;
 	unsigned int buffer_count;
@@ -133,6 +161,8 @@ struct probe_state {
 	unsigned int person_state_cursor;
 	struct person_state_entry person_states[ROCKIVA_MAX_OBJ_NUM];
 	uint64_t captures;
+	uint64_t samples_received;
+	uint64_t samples_rejected;
 	uint64_t qbufs;
 	uint64_t qbuf_failures;
 	uint64_t sequence_errors;
@@ -572,6 +602,7 @@ static void release_callback(const RockIvaReleaseFrames *frames, void *userdata)
 		struct probe_frame *record = find_frame_locked(state, released->frameId);
 		uint64_t now = monotonic_ns();
 		uint64_t submitted = record ? record->submitted_ns : 0;
+		int release_mismatch;
 
 		log_printf(PROBE_OUTPUT_DETAIL,
 		       "  released frame_id=%" PRIu32 " buffer=%u fd=%" PRId32
@@ -588,25 +619,47 @@ static void release_callback(const RockIvaReleaseFrames *frames, void *userdata)
 			continue;
 		}
 		record->release_seen = 1;
-		if (released->channelId != state->channel_id ||
-		    released->dataFd != state->buffers[record->buffer_index].export_fd ||
-		    released->dataAddr != NULL || released->dataPhyAddr != NULL) {
+		if (state->input_kind == PROBE_INPUT_MP4) {
+			release_mismatch = released->channelId != state->channel_id ||
+				released->dataFd != -1 ||
+				released->dataAddr != record->cpu_buffer ||
+				released->dataPhyAddr != NULL;
+		} else {
+			release_mismatch = !state->buffers ||
+				record->buffer_index >= state->buffer_count ||
+				released->channelId != state->channel_id ||
+				released->dataFd !=
+					state->buffers[record->buffer_index].export_fd ||
+				released->dataAddr != NULL || released->dataPhyAddr != NULL;
+		}
+		if (release_mismatch) {
 			state->release_mismatches++;
 			state->release_unmatched++;
 			fprintf(stderr, "release mismatch frame_id=%" PRIu32
-				" expected_fd=%d actual_fd=%" PRId32 "\n",
-				released->frameId,
-				state->buffers[record->buffer_index].export_fd,
-				released->dataFd);
+				" source=%s expected_fd=%d actual_fd=%" PRId32
+				" expected_data=%p actual_data=%p\n", released->frameId,
+				state->input_kind == PROBE_INPUT_MP4 ? "mp4" : "v4l2",
+				state->input_kind == PROBE_INPUT_MP4 ? -1 :
+					(state->buffers && record->buffer_index < state->buffer_count
+					 ? state->buffers[record->buffer_index].export_fd : -1),
+				released->dataFd,
+				state->input_kind == PROBE_INPUT_MP4 ?
+					(void *)record->cpu_buffer : NULL,
+				(void *)released->dataAddr);
 			continue;
 		}
 		record->release_valid = 1;
 		record->release_accounted = 1;
+		record->state = FRAME_RELEASED;
 		state->released_frames++;
 		update_latency(submitted, now, &state->release_latency_count,
 		       &state->release_latency_sum_ns,
 		       &state->release_latency_min_ns,
 		       &state->release_latency_max_ns, "release");
+		if (state->input_kind == PROBE_INPUT_MP4) {
+			free(record->cpu_buffer);
+			record->cpu_buffer = NULL;
+		}
 	}
 	signal_callbacks_locked(state);
 	pthread_mutex_unlock(&state->metrics_lock);
@@ -676,6 +729,15 @@ static int parse_log_level(const char *value, enum probe_log_level *level)
 	return 0;
 }
 
+static int parse_rotation(const char *value, unsigned int *rotation)
+{
+	if (parse_uint(value, 270U, rotation) != 0 ||
+	    (*rotation != 0U && *rotation != 90U && *rotation != 180U &&
+	     *rotation != 270U))
+		return -1;
+	return 0;
+}
+
 static const char *log_level_name(enum probe_log_level level)
 {
 	switch (level) {
@@ -693,15 +755,18 @@ static const char *log_level_name(enum probe_log_level level)
 
 static void usage(const char *program)
 {
-	fprintf(stderr, "usage: %s --device PATH --model-path DIR --width N "
-		"--height N (--frames N | --continuous) [options]\n", program);
-	fprintf(stderr, "  --device PATH       V4L2 node (required)\n");
+	fprintf(stderr, "usage: %s (--device PATH | --input MP4) --model-path DIR "
+		"--width N --height N --frames N [options]\n", program);
+	fprintf(stderr, "  --device PATH       V4L2 node for native capture mode\n");
+	fprintf(stderr, "  --input MP4         MP4 file for board test-source mode\n");
 	fprintf(stderr, "  --allow-mainpath    explicitly permit /dev/video24\n");
 	fprintf(stderr, "  --model-path DIR    RockIVA model directory (required)\n");
 	fprintf(stderr, "  --width N           requested NV12 width (required)\n");
 	fprintf(stderr, "  --height N          requested NV12 height (required)\n");
-	fprintf(stderr, "  --frames N          captured frame count (required unless --continuous)\n");
-	fprintf(stderr, "  --continuous        capture until SIGINT/SIGTERM\n");
+	fprintf(stderr, "  --frames N          frame count (required; MP4 mode is finite)\n");
+	fprintf(stderr, "  --continuous        V4L2 capture until SIGINT/SIGTERM\n");
+	fprintf(stderr, "  --fps N             MP4 output frame rate (default: %u)\n",
+		DEFAULT_FILE_FPS);
 	fprintf(stderr, "  --buffers N         V4L2 queue depth (default: %u)\n",
 		DEFAULT_BUFFERS);
 	fprintf(stderr, "  --model pfp|cls8|person (default: pfp)\n");
@@ -709,6 +774,18 @@ static void usage(const char *program)
 		DEFAULT_CHANNEL);
 	fprintf(stderr, "  --core-mask MASK     RockIVA core mask (default: 0x%x)\n",
 		DEFAULT_CORE_MASK);
+	fprintf(stderr, "  --display            MP4 mode: show video on the board screen\n");
+	fprintf(stderr, "  --no-display         MP4 mode: disable board screen output\n");
+	fprintf(stderr, "  --connector-id N     KMS connector ID (default: %u)\n",
+		DEFAULT_CONNECTOR_ID);
+	fprintf(stderr, "  --plane-id N         KMS plane ID (default: %u)\n",
+		DEFAULT_PLANE_ID);
+	fprintf(stderr, "  --preview-rotation N screen rotation: 0|90|180|270 (default: %u)\n",
+		DEFAULT_PREVIEW_ROTATION);
+	fprintf(stderr, "  --preview-width N    screen output width (default: %u)\n",
+		DEFAULT_PREVIEW_WIDTH);
+	fprintf(stderr, "  --preview-height N   screen output height (default: %u)\n",
+		DEFAULT_PREVIEW_HEIGHT);
 	fprintf(stderr, "  --timeout-ms N       per-frame/callback timeout (default: %d)\n",
 		DEFAULT_TIMEOUT_MS);
 	fprintf(stderr, "  --log-level LEVEL    quiet|summary|events|all (default: all)\n");
@@ -724,15 +801,24 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 {
 	static const struct option long_options[] = {
 		{"device", required_argument, NULL, 'd'},
+		{"input", required_argument, NULL, 'u'},
 		{"allow-mainpath", no_argument, NULL, 'a'},
 		{"model-path", required_argument, NULL, 'm'},
 		{"width", required_argument, NULL, 'w'},
 		{"height", required_argument, NULL, 'h'},
 		{"frames", required_argument, NULL, 'n'},
+		{"fps", required_argument, NULL, 'f'},
 		{"buffers", required_argument, NULL, 'b'},
 		{"model", required_argument, NULL, 'M'},
 		{"channel", required_argument, NULL, 'c'},
 		{"core-mask", required_argument, NULL, 'k'},
+		{"display", no_argument, NULL, 'D'},
+		{"no-display", no_argument, NULL, 'N'},
+		{"connector-id", required_argument, NULL, 'j'},
+		{"plane-id", required_argument, NULL, 'q'},
+		{"preview-rotation", required_argument, NULL, 'o'},
+		{"preview-width", required_argument, NULL, 'x'},
+		{"preview-height", required_argument, NULL, 'y'},
 		{"timeout-ms", required_argument, NULL, 't'},
 		{"log-level", required_argument, NULL, 'l'},
 		{"report-interval-ms", required_argument, NULL, 'i'},
@@ -743,12 +829,15 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 		{NULL, 0, NULL, 0},
 	};
 	int option;
+	int have_device = 0;
+	int have_input = 0;
 	int have_width = 0;
 	int have_height = 0;
 	int have_frames = 0;
 
 	memset(options, 0, sizeof(*options));
 	options->buffers = DEFAULT_BUFFERS;
+	options->fps = DEFAULT_FILE_FPS;
 	options->model = DEFAULT_MODEL;
 	options->channel_id = DEFAULT_CHANNEL;
 	options->core_mask = DEFAULT_CORE_MASK;
@@ -757,11 +846,22 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 	options->log_level = PROBE_LOG_ALL;
 	options->min_person_observations = DEFAULT_MIN_PERSON_OBSERVATIONS;
 	options->min_tracking_observations = DEFAULT_MIN_TRACKING_OBSERVATIONS;
-	while ((option = getopt_long(argc, argv, "dam:w:h:n:b:M:c:k:t:l:i:p:r:CH",
+	options->connector_id = DEFAULT_CONNECTOR_ID;
+	options->plane_id = DEFAULT_PLANE_ID;
+	options->preview_rotation = DEFAULT_PREVIEW_ROTATION;
+	options->preview_width = DEFAULT_PREVIEW_WIDTH;
+	options->preview_height = DEFAULT_PREVIEW_HEIGHT;
+	while ((option = getopt_long(argc, argv,
+					"d:u:am:w:h:n:f:b:M:c:k:DNj:q:o:x:y:t:l:i:p:r:CH",
 					long_options, NULL)) != -1) {
 		switch (option) {
 		case 'd':
 			options->device = optarg;
+			have_device = 1;
+			break;
+		case 'u':
+			options->input_path = optarg;
+			have_input = 1;
 			break;
 		case 'a':
 			options->allow_mainpath = 1;
@@ -784,6 +884,10 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 				return -1;
 			have_frames = 1;
 			break;
+		case 'f':
+			if (parse_positive_uint(optarg, ROCKIVA_MAX_FRAMERATE, &options->fps) != 0)
+				return -1;
+			break;
 		case 'b':
 			if (parse_positive_uint(optarg, MAX_QUEUE_BUFFERS, &options->buffers) != 0)
 				return -1;
@@ -798,6 +902,38 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 			break;
 		case 'k':
 			if (parse_uint(optarg, UINT32_MAX, &options->core_mask) != 0)
+				return -1;
+			break;
+		case 'D':
+			if (options->display != 0)
+				return -1;
+			options->display = 1;
+			break;
+		case 'N':
+			if (options->display != 0)
+				return -1;
+			options->display = -1;
+			break;
+		case 'j':
+			if (parse_uint(optarg, INT32_MAX, &options->connector_id) != 0)
+				return -1;
+			break;
+		case 'q':
+			if (parse_uint(optarg, INT32_MAX, &options->plane_id) != 0)
+				return -1;
+			break;
+		case 'o':
+			if (parse_rotation(optarg, &options->preview_rotation) != 0)
+				return -1;
+			break;
+		case 'x':
+			if (parse_positive_uint(optarg, UINT16_MAX,
+						&options->preview_width) != 0)
+				return -1;
+			break;
+		case 'y':
+			if (parse_positive_uint(optarg, UINT16_MAX,
+						&options->preview_height) != 0)
 				return -1;
 			break;
 		case 't': {
@@ -834,10 +970,30 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 			return -1;
 		}
 	}
-	if (optind != argc || !options->device || !options->device[0] ||
-	    !options->model_path || !options->model_path[0] || !have_width ||
-	    !have_height || (!options->continuous && !have_frames) ||
+	if (optind != argc || !options->model_path || !options->model_path[0] ||
+	    !have_width || !have_height ||
+	    (!options->continuous && !have_frames) ||
+	    (have_device == have_input) ||
+	    (have_device && (!options->device || !options->device[0])) ||
+	    (have_input && (!options->input_path || !options->input_path[0])) ||
 	    options->width % 2 != 0 || options->height % 2 != 0) {
+		return -1;
+	}
+	if (have_input && options->continuous) {
+		fprintf(stderr, "--continuous cannot be used with --input\n");
+		return -1;
+	}
+	if (have_input && options->allow_mainpath) {
+		fprintf(stderr, "--allow-mainpath can only be used with --device\n");
+		return -1;
+	}
+	if (have_device && (options->display != 0 ||
+			    options->connector_id != DEFAULT_CONNECTOR_ID ||
+			    options->plane_id != DEFAULT_PLANE_ID ||
+			    options->preview_rotation != DEFAULT_PREVIEW_ROTATION ||
+			    options->preview_width != DEFAULT_PREVIEW_WIDTH ||
+			    options->preview_height != DEFAULT_PREVIEW_HEIGHT)) {
+		fprintf(stderr, "screen output options can only be used with --input\n");
 		return -1;
 	}
 	if (options->continuous && have_frames) {
@@ -848,10 +1004,18 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 		fprintf(stderr, "--continuous cannot be used with --allow-mainpath\n");
 		return -1;
 	}
-	if (rockiva_probe_is_mainpath(options->device, ROCKIVA_PROBE_MAINPATH) &&
+	if (have_device && rockiva_probe_is_mainpath(options->device, ROCKIVA_PROBE_MAINPATH) &&
 	    !options->allow_mainpath) {
 		fprintf(stderr, "refusing production mainpath %s; pass --allow-mainpath "
-			"only for an explicitly approved experiment\n", options->device);
+				"only for an explicitly approved experiment\n", options->device);
+		return -1;
+	}
+	if (have_input && options->display == 0)
+		options->display = 1;
+	if (options->display < 0)
+		options->display = 0;
+	if (options->preview_width % 2 != 0 || options->preview_height % 2 != 0) {
+		fprintf(stderr, "preview dimensions must be even\n");
 		return -1;
 	}
 	return 0;
@@ -1425,6 +1589,15 @@ static uint64_t count_inflight_locked(const struct probe_state *state)
 	unsigned int i;
 	uint64_t count = 0;
 
+	if (state->input_kind == PROBE_INPUT_MP4) {
+		for (i = 0; i < state->frame_count; i++) {
+			if ((state->frames[i].state == FRAME_PENDING ||
+			     state->frames[i].state == FRAME_ACCEPTED) &&
+			    !state->frames[i].release_accounted)
+				count++;
+		}
+		return count;
+	}
 	for (i = 0; i < state->buffer_count; i++) {
 		if (state->buffers[i].owner_frame_id != 0)
 			count++;
@@ -1478,7 +1651,7 @@ static void maybe_report_summary(struct probe_state *state,
 }
 
 static enum frame_state mark_push_failure_locked(struct probe_state *state,
-						 uint32_t frame_id)
+							 uint32_t frame_id)
 {
 	struct probe_frame *record = find_frame_locked(state, frame_id);
 
@@ -1491,8 +1664,45 @@ static enum frame_state mark_push_failure_locked(struct probe_state *state,
 		return FRAME_ACCEPTED;
 	}
 	record->state = FRAME_REJECTED;
-	state->buffers[record->buffer_index].owner_frame_id = 0;
+	if (state->buffers && record->buffer_index < state->buffer_count)
+		state->buffers[record->buffer_index].owner_frame_id = 0;
 	return FRAME_REJECTED;
+}
+
+static uint8_t *take_mp4_buffer_on_push_failure_locked(
+							struct probe_state *state, uint32_t frame_id)
+{
+	struct probe_frame *record = find_frame_locked(state, frame_id);
+	uint8_t *buffer;
+
+	if (!record || record->state != FRAME_PENDING)
+		return NULL;
+	if (record->detection_completed || record->release_seen) {
+		record->state = FRAME_ACCEPTED;
+		state->accepted_frames++;
+		return NULL;
+	}
+	buffer = record->cpu_buffer;
+	record->cpu_buffer = NULL;
+	record->state = FRAME_REJECTED;
+	return buffer;
+}
+
+static void free_unreturned_mp4_buffers(struct probe_state *state)
+{
+	size_t i;
+
+	pthread_mutex_lock(&state->metrics_lock);
+	for (i = 0; i < state->frame_count; i++) {
+		if (!state->frames[i].cpu_buffer)
+			continue;
+		free(state->frames[i].cpu_buffer);
+		state->frames[i].cpu_buffer = NULL;
+		if (state->frames[i].state == FRAME_PENDING ||
+		    state->frames[i].state == FRAME_ACCEPTED)
+			state->frames[i].state = FRAME_REJECTED;
+	}
+	pthread_mutex_unlock(&state->metrics_lock);
 }
 
 static int wait_finish(RockIvaHandle handle, int timeout_ms, const char *label)
@@ -1519,6 +1729,975 @@ static int drain_callbacks(struct probe_state *state, int timeout_ms,
 	log_printf(PROBE_OUTPUT_SUMMARY,
 	       "%s: bounded callback completion fallback\n", label);
 	return wait_for_callback_completion(state, timeout_ms);
+}
+
+struct mp4_pipeline {
+	GstElement *pipeline;
+	GstAppSink *appsink;
+	GstBus *bus;
+	int started;
+};
+
+static int gst_property_available(GstElement *element, const char *name)
+{
+	return element && name &&
+		g_object_class_find_property(G_OBJECT_GET_CLASS(element), name) != NULL;
+}
+
+static int link_mp4_tee_branch(GstElement *tee, GstElement *queue,
+				       const char *branch_name)
+{
+	GstPad *tee_src;
+	GstPad *queue_sink;
+	GstPadLinkReturn result;
+
+	tee_src = gst_element_request_pad_simple(tee, "src_%u");
+	queue_sink = gst_element_get_static_pad(queue, "sink");
+	if (!tee_src || !queue_sink) {
+		fprintf(stderr, "cannot create MP4 %s tee branch pads\n", branch_name);
+		if (tee_src) {
+			gst_element_release_request_pad(tee, tee_src);
+			gst_object_unref(tee_src);
+		}
+		if (queue_sink)
+			gst_object_unref(queue_sink);
+		return -1;
+	}
+	result = gst_pad_link_full(tee_src, queue_sink,
+					   GST_PAD_LINK_CHECK_NOTHING);
+	if (result != GST_PAD_LINK_OK) {
+		fprintf(stderr, "cannot link MP4 %s tee branch: %s\n", branch_name,
+			gst_pad_link_get_name(result));
+		gst_element_release_request_pad(tee, tee_src);
+		gst_object_unref(tee_src);
+		gst_object_unref(queue_sink);
+		return -1;
+	}
+	/* The tee owns the request pad for the lifetime of this finite pipeline. */
+	gst_object_unref(tee_src);
+	gst_object_unref(queue_sink);
+	return 0;
+}
+
+static void on_mp4_demux_pad_added(GstElement *demux, GstPad *new_pad,
+					    gpointer user_data)
+{
+	GstElement *parser = GST_ELEMENT(user_data);
+	GstCaps *caps = NULL;
+	const GstStructure *structure;
+	const gchar *name = NULL;
+	GstPad *sink_pad;
+	GstPadLinkReturn link_result;
+
+	(void)demux;
+	caps = gst_pad_get_current_caps(new_pad);
+	if (!caps)
+		caps = gst_pad_query_caps(new_pad, NULL);
+	if (caps && gst_caps_get_size(caps) > 0) {
+		structure = gst_caps_get_structure(caps, 0);
+		name = gst_structure_get_name(structure);
+	}
+	if ((!name || !g_str_has_prefix(name, "video/")) &&
+	    !g_str_has_prefix(GST_PAD_NAME(new_pad), "video")) {
+		if (caps)
+			gst_caps_unref(caps);
+		return;
+	}
+	sink_pad = gst_element_get_static_pad(parser, "sink");
+	if (!sink_pad) {
+		if (caps)
+			gst_caps_unref(caps);
+		g_printerr("cannot obtain h264parse sink pad\n");
+		return;
+	}
+	if (!gst_pad_is_linked(sink_pad)) {
+		link_result = gst_pad_link(new_pad, sink_pad);
+		if (link_result != GST_PAD_LINK_OK)
+			g_printerr("failed to link MP4 video pad: %s\n",
+				gst_pad_link_get_name(link_result));
+	}
+	gst_object_unref(sink_pad);
+	if (caps)
+		gst_caps_unref(caps);
+}
+
+static GstElement *create_mp4_pipeline(const struct probe_options *options)
+{
+	GstElement *pipeline = NULL;
+	GstElement *source = NULL;
+	GstElement *demux = NULL;
+	GstElement *parser = NULL;
+	GstElement *decoder = NULL;
+	GstElement *convert = NULL;
+	GstElement *scale = NULL;
+	GstElement *rate = NULL;
+	GstElement *capsfilter = NULL;
+	GstElement *appsink = NULL;
+	GstElement *tee = NULL;
+	GstElement *analysis_queue = NULL;
+	GstElement *display_queue = NULL;
+	GstElement *display_rotate = NULL;
+	GstElement *display_sink = NULL;
+	GstCaps *caps = NULL;
+	int elements_added = 0;
+
+	pipeline = gst_pipeline_new("rockiva-mp4-probe");
+	source = gst_element_factory_make("filesrc", "mp4-source");
+	demux = gst_element_factory_make("qtdemux", "mp4-demux");
+	parser = gst_element_factory_make("h264parse", "mp4-parser");
+	decoder = gst_element_factory_make("mppvideodec", "mp4-decoder");
+	convert = gst_element_factory_make("videoconvert", "mp4-convert");
+	scale = gst_element_factory_make("videoscale", "mp4-scale");
+	rate = gst_element_factory_make("videorate", "mp4-rate");
+	capsfilter = gst_element_factory_make("capsfilter", "mp4-caps");
+	appsink = gst_element_factory_make("appsink", "mp4-sink");
+	if (options->display) {
+		tee = gst_element_factory_make("tee", "mp4-tee");
+		analysis_queue = gst_element_factory_make("queue", "mp4-analysis-queue");
+		display_queue = gst_element_factory_make("queue", "mp4-display-queue");
+		display_rotate = gst_element_factory_make("rgarotate", "mp4-display-rga");
+		display_sink = gst_element_factory_make("kmssink", "mp4-display-sink");
+	}
+	if (!pipeline || !source || !demux || !parser || !decoder || !convert ||
+	    !scale || !rate || !capsfilter || !appsink ||
+	    (options->display && (!tee || !analysis_queue || !display_queue ||
+					    !display_rotate || !display_sink))) {
+		fprintf(stderr, "required MP4 GStreamer elements are unavailable\n");
+		goto create_failed;
+	}
+	if (options->display) {
+		int rga_rotation = gst_property_available(display_rotate, "rotation");
+		int rga_width = gst_property_available(display_rotate, "out-width");
+		int rga_height = gst_property_available(display_rotate, "out-height");
+		int kms_sync = gst_property_available(display_sink, "sync");
+		int kms_connector = gst_property_available(display_sink, "connector-id");
+		int kms_plane = gst_property_available(display_sink, "plane-id");
+		int kms_skip_vsync = gst_property_available(display_sink, "skip-vsync");
+
+		if (!rga_rotation || !rga_width || !rga_height || !kms_sync ||
+		    !kms_connector || !kms_plane || !kms_skip_vsync) {
+			fprintf(stderr,
+				"MP4 display path property check failed: rga="
+				"%d/%d/%d kms="
+				"%d/%d/%d/%d\n",
+				rga_rotation, rga_width, rga_height, kms_sync,
+				kms_connector, kms_plane, kms_skip_vsync);
+			goto create_failed;
+		}
+	}
+
+	/* RockIVA receives a CPU copy; do not let board defaults select AFBC/DMABUF. */
+	g_object_set(decoder, "arm-afbc", FALSE, "dma-feature", FALSE, NULL);
+	g_object_set(source, "location", options->input_path, NULL);
+	caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "NV12",
+				   "width", G_TYPE_INT, (gint)options->width,
+				   "height", G_TYPE_INT, (gint)options->height,
+				   "framerate", GST_TYPE_FRACTION, (gint)options->fps, 1,
+				   "interlace-mode", G_TYPE_STRING, "progressive", NULL);
+	if (!caps) {
+		goto create_failed;
+	}
+	g_object_set(capsfilter, "caps", caps, NULL);
+	gst_caps_unref(caps);
+	caps = NULL;
+	g_object_set(appsink, "emit-signals", FALSE, "sync", FALSE,
+		     "max-buffers", 4U, "drop", FALSE, "wait-on-eos", FALSE,
+		     "enable-last-sample", FALSE, NULL);
+	if (options->display) {
+		/* The production preview consumes the decoder's DMA-BUF directly. */
+		g_object_set(decoder, "dma-feature", TRUE, NULL);
+		/* Keep a slow KMS page-flip from blocking the RockIVA input branch. */
+		g_object_set(analysis_queue, "max-size-buffers", 4U, NULL);
+		g_object_set(display_queue, "leaky", 2 /* downstream */,
+			     "max-size-buffers", 2U, NULL);
+		g_object_set(display_rotate, "rotation", (gint)options->preview_rotation,
+			     "out-width", (gint)options->preview_width,
+			     "out-height", (gint)options->preview_height, NULL);
+		g_object_set(display_sink, "sync", FALSE,
+			     "connector-id", (gint)options->connector_id,
+			     "plane-id", (gint)options->plane_id,
+			     "skip-vsync", TRUE, NULL);
+	}
+
+	gst_bin_add_many(GST_BIN(pipeline), source, demux, parser, decoder, NULL);
+	if (options->display)
+		gst_bin_add_many(GST_BIN(pipeline), tee, analysis_queue, convert, scale,
+				 rate, capsfilter, appsink, display_queue, display_rotate,
+				 display_sink, NULL);
+	else
+		gst_bin_add_many(GST_BIN(pipeline), convert, scale, rate, capsfilter,
+				 appsink, NULL);
+	elements_added = 1;
+	if (!gst_element_link(source, demux) ||
+	    !gst_element_link(parser, decoder)) {
+		fprintf(stderr, "failed to link MP4 decode pipeline\n");
+		goto pipeline_failed;
+	}
+	if (options->display) {
+		if (!gst_element_link(decoder, tee) ||
+		    !gst_element_link_many(analysis_queue, convert, scale, rate,
+					   capsfilter, appsink, NULL) ||
+		    link_mp4_tee_branch(tee, analysis_queue, "analysis") != 0 ||
+		    link_mp4_tee_branch(tee, display_queue, "display") != 0 ||
+		    !gst_element_link_many(display_queue, display_rotate, display_sink,
+					   NULL)) {
+			fprintf(stderr, "failed to link MP4 display/analysis branches\n");
+			goto pipeline_failed;
+		}
+	} else if (!gst_element_link_many(decoder, convert, scale, rate,
+						capsfilter, appsink, NULL)) {
+		fprintf(stderr, "failed to link MP4 appsink\n");
+		goto pipeline_failed;
+	}
+	g_signal_connect(demux, "pad-added", G_CALLBACK(on_mp4_demux_pad_added), parser);
+	if (options->display) {
+		log_printf(PROBE_OUTPUT_SUMMARY,
+		       "pipeline=filesrc location=%s ! qtdemux ! h264parse ! "
+		       "mppvideodec(dma-feature=true) ! tee(name=mp4-tee) -> "
+		       "analysis videoconvert ! videoscale ! videorate ! "
+		       "video/x-raw,format=NV12,width=%u,height=%u,framerate=%u/1 ! "
+		       "appsink + display "
+		       "rgarotate(rotation=%u,out=%ux%u) ! kmssink(connector=%u,plane=%u)\n",
+		       options->input_path, options->width, options->height, options->fps,
+		       options->preview_rotation, options->preview_width,
+		       options->preview_height, options->connector_id, options->plane_id);
+	} else {
+		log_printf(PROBE_OUTPUT_SUMMARY,
+		       "pipeline=filesrc location=%s ! qtdemux ! h264parse ! "
+		       "mppvideodec ! videoconvert ! videoscale ! videorate ! "
+		       "video/x-raw,format=NV12,width=%u,height=%u,framerate=%u/1 ! appsink\n",
+		       options->input_path, options->width, options->height, options->fps);
+	}
+	return pipeline;
+
+pipeline_failed:
+	if (elements_added)
+		gst_object_unref(pipeline);
+	return NULL;
+
+create_failed:
+	if (caps)
+		gst_caps_unref(caps);
+	if (pipeline)
+		gst_object_unref(pipeline);
+	if (display_sink)
+		gst_object_unref(display_sink);
+	if (display_rotate)
+		gst_object_unref(display_rotate);
+	if (display_queue)
+		gst_object_unref(display_queue);
+	if (analysis_queue)
+		gst_object_unref(analysis_queue);
+	if (tee)
+		gst_object_unref(tee);
+	if (appsink)
+		gst_object_unref(appsink);
+	if (capsfilter)
+		gst_object_unref(capsfilter);
+	if (rate)
+		gst_object_unref(rate);
+	if (scale)
+		gst_object_unref(scale);
+	if (convert)
+		gst_object_unref(convert);
+	if (decoder)
+		gst_object_unref(decoder);
+	if (parser)
+		gst_object_unref(parser);
+	if (demux)
+		gst_object_unref(demux);
+	if (source)
+		gst_object_unref(source);
+	return NULL;
+}
+
+static void report_mp4_bus_message(GstMessage *message)
+{
+	GError *error = NULL;
+	gchar *debug = NULL;
+
+	if (GST_MESSAGE_TYPE(message) != GST_MESSAGE_ERROR)
+		return;
+	gst_message_parse_error(message, &error, &debug);
+	fprintf(stderr, "GStreamer error from %s: %s%s%s%s\n",
+		GST_OBJECT_NAME(message->src), error ? error->message : "unknown",
+		debug ? " (" : "", debug ? debug : "", debug ? ")" : "");
+	if (error)
+		g_error_free(error);
+	g_free(debug);
+}
+
+static int drain_mp4_errors(GstBus *bus)
+{
+	GstMessage *message;
+	int failed = 0;
+
+	if (!bus)
+		return 0;
+	while ((message = gst_bus_pop_filtered(bus, GST_MESSAGE_ERROR))) {
+		failed = 1;
+		report_mp4_bus_message(message);
+		gst_message_unref(message);
+	}
+	return failed;
+}
+
+static int start_mp4_pipeline(struct mp4_pipeline *source, int timeout_ms)
+{
+	GstStateChangeReturn result;
+	GstState state = GST_STATE_NULL;
+	GstState pending = GST_STATE_VOID_PENDING;
+	GstClockTime timeout = (GstClockTime)timeout_ms * GST_MSECOND;
+	int bus_failed;
+
+	source->started = 1;
+	result = gst_element_set_state(source->pipeline, GST_STATE_PLAYING);
+	if (result == GST_STATE_CHANGE_FAILURE) {
+		fprintf(stderr, "failed to set MP4 decode pipeline PLAYING\n");
+		return -1;
+	}
+	result = gst_element_get_state(source->pipeline, &state, &pending, timeout);
+	bus_failed = drain_mp4_errors(source->bus);
+	if (result == GST_STATE_CHANGE_FAILURE || state != GST_STATE_PLAYING ||
+	    bus_failed) {
+		fprintf(stderr, "MP4 decode pipeline did not reach PLAYING: result=%d "
+			"state=%d pending=%d bus_failed=%d\n", result, state, pending,
+			bus_failed);
+		return -1;
+	}
+	log_printf(PROBE_OUTPUT_SUMMARY, "pipeline_state=PLAYING\n");
+	return 0;
+}
+
+static int stop_mp4_pipeline(struct mp4_pipeline *source, int timeout_ms)
+{
+	GstStateChangeReturn result;
+	GstState state = GST_STATE_VOID_PENDING;
+	GstState pending = GST_STATE_VOID_PENDING;
+	GstClockTime timeout = (GstClockTime)timeout_ms * GST_MSECOND;
+
+	result = gst_element_set_state(source->pipeline, GST_STATE_NULL);
+	if (result == GST_STATE_CHANGE_FAILURE) {
+		fprintf(stderr, "failed to set MP4 decode pipeline NULL\n");
+		return -1;
+	}
+	result = gst_element_get_state(source->pipeline, &state, &pending, timeout);
+	if (result == GST_STATE_CHANGE_FAILURE || state != GST_STATE_NULL) {
+		fprintf(stderr, "MP4 decode pipeline did not reach NULL: result=%d "
+			"state=%d pending=%d\n", result, state, pending);
+		return -1;
+	}
+	log_printf(PROBE_OUTPUT_SUMMARY, "pipeline_state=NULL\n");
+	return 0;
+}
+
+static int pull_mp4_sample(struct mp4_pipeline *source, int timeout_ms,
+				   GstSample **sample, int *eos)
+{
+	GstClockTime timeout = (GstClockTime)timeout_ms * GST_MSECOND;
+
+	*sample = gst_app_sink_try_pull_sample(source->appsink, timeout);
+	if (*sample) {
+		*eos = 0;
+		return 0;
+	}
+	if (gst_app_sink_is_eos(source->appsink)) {
+		if (drain_mp4_errors(source->bus) != 0) {
+			*eos = 0;
+			return -1;
+		}
+		*eos = 1;
+		return 0;
+	}
+	*eos = 0;
+	if (drain_mp4_errors(source->bus) == 0)
+		fprintf(stderr, "timed out waiting for decoded MP4 video sample\n");
+	return -1;
+}
+
+static int inspect_mp4_sample(GstSample *sample,
+				      const struct probe_options *options,
+				      GstVideoInfo *video_info, char *reason,
+				      size_t reason_size)
+{
+	GstBuffer *buffer;
+	GstCaps *caps;
+
+	if (!sample || !video_info)
+		goto invalid;
+	buffer = gst_sample_get_buffer(sample);
+	caps = gst_sample_get_caps(sample);
+	if (!buffer || !caps || gst_caps_get_size(caps) != 1 ||
+	    !gst_video_info_from_caps(video_info, caps))
+		goto invalid;
+	if (GST_VIDEO_INFO_FORMAT(video_info) != GST_VIDEO_FORMAT_NV12)
+		goto format_invalid;
+	if ((guint)GST_VIDEO_INFO_WIDTH(video_info) != options->width ||
+	    (guint)GST_VIDEO_INFO_HEIGHT(video_info) != options->height)
+		goto dimensions_invalid;
+	if (GST_VIDEO_INFO_INTERLACE_MODE(video_info) !=
+	    GST_VIDEO_INTERLACE_MODE_PROGRESSIVE)
+		goto interlace_invalid;
+	if (GST_VIDEO_INFO_N_PLANES(video_info) != 2)
+		goto planes_invalid;
+	return 0;
+
+format_invalid:
+	snprintf(reason, reason_size, "decoded caps are not NV12");
+	return -1;
+dimensions_invalid:
+	snprintf(reason, reason_size, "decoded dimensions differ from request");
+	return -1;
+interlace_invalid:
+	snprintf(reason, reason_size, "interlaced decoded input is not accepted");
+	return -1;
+planes_invalid:
+	snprintf(reason, reason_size, "decoded NV12 must describe two logical planes");
+	return -1;
+invalid:
+	snprintf(reason, reason_size, "sample has no buffer/caps");
+	return -1;
+}
+
+static int copy_mp4_nv12_sample(GstSample *sample,
+					const struct probe_options *options,
+					const GstVideoInfo *video_info, uint8_t *destination,
+					size_t destination_size, char *reason, size_t reason_size)
+{
+	GstBuffer *buffer;
+	GstVideoFrame video_frame = {0};
+	guint8 *y_plane;
+	guint8 *uv_plane;
+	gint y_stride;
+	gint uv_stride;
+	size_t y_size;
+	size_t uv_offset;
+	unsigned int row;
+
+	if (!sample || !video_info || !destination)
+		goto invalid;
+	buffer = gst_sample_get_buffer(sample);
+	if (!buffer)
+		goto invalid;
+	if (!gst_video_frame_map(&video_frame, video_info, buffer, GST_MAP_READ))
+		goto map_invalid;
+	y_plane = GST_VIDEO_FRAME_PLANE_DATA(&video_frame, 0);
+	uv_plane = GST_VIDEO_FRAME_PLANE_DATA(&video_frame, 1);
+	y_stride = GST_VIDEO_FRAME_PLANE_STRIDE(&video_frame, 0);
+	uv_stride = GST_VIDEO_FRAME_PLANE_STRIDE(&video_frame, 1);
+	y_size = (size_t)options->width * (size_t)options->height;
+	uv_offset = y_size;
+	if (!y_plane || !uv_plane || y_stride < (gint)options->width ||
+	    uv_stride < (gint)options->width || y_stride <= 0 || uv_stride <= 0 ||
+	    y_size > SIZE_MAX - y_size / 2U || destination_size < y_size + y_size / 2U) {
+		gst_video_frame_unmap(&video_frame);
+		goto layout_invalid;
+	}
+	for (row = 0; row < options->height; row++)
+		memcpy(destination + (size_t)row * options->width,
+		       y_plane + (size_t)row * (size_t)y_stride, options->width);
+	for (row = 0; row < options->height / 2U; row++)
+		memcpy(destination + uv_offset + (size_t)row * options->width,
+		       uv_plane + (size_t)row * (size_t)uv_stride, options->width);
+	gst_video_frame_unmap(&video_frame);
+	return 0;
+
+map_invalid:
+	snprintf(reason, reason_size, "cannot map decoded sample as CPU video");
+	return -1;
+layout_invalid:
+	snprintf(reason, reason_size, "decoded NV12 plane layout is invalid");
+	return -1;
+invalid:
+	snprintf(reason, reason_size, "sample or destination is invalid");
+	return -1;
+}
+
+static int mp4_frame_size(const struct probe_options *options, size_t *size)
+{
+	size_t luma;
+
+	if (!size || options->width == 0 || options->height == 0 ||
+	    (size_t)options->width > SIZE_MAX / (size_t)options->height)
+		return -1;
+	luma = (size_t)options->width * (size_t)options->height;
+	if (luma > SIZE_MAX - luma / 2U)
+		return -1;
+	*size = luma + luma / 2U;
+	return 0;
+}
+
+static int mp4_sample_pts_ns(GstSample *sample, uint64_t *pts_ns)
+{
+	GstBuffer *buffer = sample ? gst_sample_get_buffer(sample) : NULL;
+	GstClockTime pts = buffer ? GST_BUFFER_PTS(buffer) : GST_CLOCK_TIME_NONE;
+
+	if (!pts_ns || !GST_CLOCK_TIME_IS_VALID(pts)) {
+		if (pts_ns)
+			*pts_ns = 0;
+		return -1;
+	}
+	*pts_ns = (uint64_t)pts;
+	return 0;
+}
+
+static void sleep_for_mp4_frame(unsigned int fps)
+{
+	struct timespec delay;
+
+	if (fps == 0)
+		return;
+	delay.tv_sec = 0;
+	delay.tv_nsec = (long)(UINT64_C(1000000000) / fps);
+	(void)nanosleep(&delay, NULL);
+}
+
+static int run_mp4_probe(const struct probe_options *options)
+{
+	static struct probe_state state;
+	struct mp4_pipeline source;
+	RockIvaInitParam init_params;
+	RockIvaDetTaskParams det_params;
+	RockIvaHandle handle = NULL;
+	RockIvaRetCode ret;
+	GstSample *first_sample = NULL;
+	GstSample *sample = NULL;
+	GstVideoInfo first_video_info;
+	GstVideoInfo video_info;
+	pthread_condattr_t cond_attr;
+	size_t frame_size;
+	uint32_t frame;
+	char version[MAX_VERSION] = {0};
+	char reason[160];
+	uint64_t source_pts_ns;
+	int cond_attr_result;
+	int cond_attr_initialized = 0;
+	int metrics_lock_initialized = 0;
+	int callbacks_cond_initialized = 0;
+	int handle_initialized = 0;
+	int detect_initialized = 0;
+	int release_callback_initialized = 0;
+	int operation_failed = 0;
+	int callback_complete = 0;
+	int final_cleanup_safe = 0;
+	int sdk_released = 0;
+	int pipeline_cleanup_safe = 0;
+	int state_cleanup_safe = 0;
+	int input_eos = 0;
+	int source_pts_valid;
+	uint64_t next_report_ns = 0;
+
+	(void)setvbuf(stdout, NULL, _IOLBF, 0);
+	configured_log_level = options->log_level;
+	stop_requested = 0;
+	memset(&source, 0, sizeof(source));
+	memset(&state, 0, sizeof(state));
+	state.input_kind = PROBE_INPUT_MP4;
+	state.channel_id = options->channel_id;
+	state.frame_count = (size_t)options->frames + 1U;
+	if (state.frame_count <= (size_t)options->frames ||
+	    state.frame_count > SIZE_MAX / sizeof(*state.frames)) {
+		fprintf(stderr, "MP4 frame table size is too large\n");
+		return 2;
+	}
+	if (mp4_frame_size(options, &frame_size) != 0) {
+		fprintf(stderr, "decoded NV12 frame size is too large\n");
+		return 2;
+	}
+	state.frames = calloc(state.frame_count, sizeof(*state.frames));
+	if (!state.frames) {
+		fprintf(stderr, "cannot allocate MP4 frame ownership table\n");
+		return 2;
+	}
+	if (install_stop_handlers() != 0) {
+		fprintf(stderr, "cannot install SIGINT/SIGTERM handlers: %s\n",
+			strerror(errno));
+		free(state.frames);
+		state.frames = NULL;
+		return 2;
+	}
+	if (pthread_mutex_init(&state.metrics_lock, NULL) != 0) {
+		fprintf(stderr, "cannot initialize metrics lock\n");
+		free(state.frames);
+		state.frames = NULL;
+		return 2;
+	}
+	metrics_lock_initialized = 1;
+	cond_attr_result = pthread_condattr_init(&cond_attr);
+	if (cond_attr_result == 0) {
+		cond_attr_initialized = 1;
+		cond_attr_result = pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC);
+	}
+	if (cond_attr_result == 0)
+		cond_attr_result = pthread_cond_init(&state.callbacks_cond, &cond_attr);
+	if (cond_attr_result == 0) {
+		callbacks_cond_initialized = 1;
+		state.callbacks_cond_initialized = 1;
+	}
+	if (cond_attr_initialized)
+		(void)pthread_condattr_destroy(&cond_attr);
+	if (cond_attr_result != 0) {
+		fprintf(stderr, "cannot initialize callback condition variable: %s\n",
+			strerror(cond_attr_result));
+		operation_failed = 1;
+		goto mp4_done;
+	}
+
+	gst_init(NULL, NULL);
+	if (options->display)
+		me_rga_rotate_register();
+	source.pipeline = create_mp4_pipeline(options);
+	if (!source.pipeline) {
+		operation_failed = 1;
+		goto mp4_done;
+	}
+	source.appsink = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(source.pipeline),
+							"mp4-sink"));
+	source.bus = gst_element_get_bus(source.pipeline);
+	if (!source.appsink || !source.bus) {
+		fprintf(stderr, "cannot obtain MP4 appsink or pipeline bus\n");
+		operation_failed = 1;
+		goto mp4_done;
+	}
+	if (start_mp4_pipeline(&source, options->timeout_ms) != 0) {
+		operation_failed = 1;
+		goto mp4_done;
+	}
+	if (pull_mp4_sample(&source, options->timeout_ms, &first_sample, &input_eos) != 0 ||
+	    !first_sample) {
+		if (input_eos)
+			fprintf(stderr, "MP4 reached EOS before decoded frame 1\n");
+		state.capture_errors++;
+		operation_failed = 1;
+		goto mp4_done;
+	}
+	if (inspect_mp4_sample(first_sample, options, &first_video_info, reason,
+				       sizeof(reason)) != 0) {
+		fprintf(stderr, "reject decoded MP4 sample 1: %s\n", reason);
+		state.samples_rejected++;
+		operation_failed = 1;
+		goto mp4_done;
+	}
+
+	memset(&init_params, 0, sizeof(init_params));
+	init_params.logLevel = ROCKIVA_LOG_ERROR;
+	ret = snprintf(init_params.modelPath, sizeof(init_params.modelPath), "%s",
+		       options->model_path);
+	if (ret < 0 || (size_t)ret >= sizeof(init_params.modelPath)) {
+		fprintf(stderr, "model path is too long for RockIVA\n");
+		operation_failed = 1;
+		goto mp4_done;
+	}
+	init_params.coreMask = options->core_mask;
+	init_params.channelId = options->channel_id;
+	init_params.detModel = options->model;
+	init_params.detObjectType = ROCKIVA_OBJECT_TYPE_BITMASK(ROCKIVA_OBJECT_TYPE_PERSON);
+	init_params.imageInfo.width = (uint16_t)options->width;
+	init_params.imageInfo.height = (uint16_t)options->height;
+	init_params.imageInfo.wstride = (uint16_t)options->width;
+	init_params.imageInfo.hstride = (uint16_t)options->height;
+	init_params.imageInfo.format = ROCKIVA_IMAGE_FORMAT_YUV420SP_NV12;
+	init_params.imageInfo.transformMode = ROCKIVA_IMAGE_TRANSFORM_NONE;
+	memset(&det_params, 0, sizeof(det_params));
+	det_params.detObjectType = ROCKIVA_OBJECT_TYPE_BITMASK(ROCKIVA_OBJECT_TYPE_PERSON);
+	log_printf(PROBE_OUTPUT_SUMMARY,
+	       "probe mode=mp4 input=%s model=%s model_path=%s width=%u height=%u "
+	       "frames=%u fps=%u channel=%u core_mask=0x%x log_level=%s "
+	       "report_interval_ms=%u min_person=%u min_tracking=%u display=%s "
+	       "connector_id=%u plane_id=%u preview_rotation=%u preview_width=%u "
+	       "preview_height=%u\n",
+	       options->input_path, model_name(options->model), options->model_path,
+	       options->width, options->height, options->frames, options->fps,
+	       options->channel_id, options->core_mask, log_level_name(options->log_level),
+	       options->report_interval_ms, options->min_person_observations,
+	       options->min_tracking_observations, options->display ? "on" : "off",
+	       options->connector_id, options->plane_id, options->preview_rotation,
+	       options->preview_width, options->preview_height);
+	ret = ROCKIVA_GetVersion(MAX_VERSION, version);
+	log_printf(PROBE_OUTPUT_SUMMARY, "rockiva version ret=%d value=%s\n", ret,
+	       version[0] ? version : "(unavailable)");
+	if (ret != ROCKIVA_RET_SUCCESS) {
+		operation_failed = 1;
+		goto mp4_done;
+	}
+	ret = ROCKIVA_Init(&handle, ROCKIVA_MODE_VIDEO, &init_params, &state);
+	if (ret != ROCKIVA_RET_SUCCESS) {
+		fprintf(stderr, "ROCKIVA_Init failed: %d\n", ret);
+		operation_failed = 1;
+		goto mp4_done;
+	}
+	handle_initialized = 1;
+	ret = ROCKIVA_DETECT_Init(handle, &det_params, detect_callback);
+	if (ret != ROCKIVA_RET_SUCCESS) {
+		fprintf(stderr, "ROCKIVA_DETECT_Init failed: %d\n", ret);
+		operation_failed = 1;
+		goto mp4_sdk_cleanup;
+	}
+	detect_initialized = 1;
+	ret = ROCKIVA_SetFrameReleaseCallback(handle, release_callback);
+	if (ret != ROCKIVA_RET_SUCCESS) {
+		fprintf(stderr, "ROCKIVA_SetFrameReleaseCallback failed: %d\n", ret);
+		operation_failed = 1;
+		goto mp4_sdk_cleanup;
+	}
+	release_callback_initialized = 1;
+	for (frame = 1; frame <= options->frames && !stop_requested; frame++) {
+		struct probe_frame *record;
+		uint8_t *frame_buffer = NULL;
+		uint8_t *failed_buffer = NULL;
+		uint64_t submitted;
+		RockIvaImage image;
+
+		if (frame == 1) {
+			sample = first_sample;
+			first_sample = NULL;
+			video_info = first_video_info;
+		} else {
+			if (pull_mp4_sample(&source, options->timeout_ms, &sample,
+						    &input_eos) != 0) {
+				operation_failed = 1;
+				break;
+			}
+			if (!sample) {
+				if (input_eos)
+					fprintf(stderr, "MP4 ended before decoded frame %u\n", frame);
+				operation_failed = 1;
+				break;
+			}
+			video_info = first_video_info;
+		}
+		pthread_mutex_lock(&state.metrics_lock);
+		state.samples_received++;
+		state.captures++;
+		pthread_mutex_unlock(&state.metrics_lock);
+		if (inspect_mp4_sample(sample, options, &video_info, reason,
+					       sizeof(reason)) != 0) {
+			fprintf(stderr, "reject decoded MP4 sample %u: %s\n", frame, reason);
+			state.samples_rejected++;
+			state.capture_errors++;
+			gst_sample_unref(sample);
+			sample = NULL;
+			operation_failed = 1;
+			break;
+		}
+		frame_buffer = malloc(frame_size);
+		if (!frame_buffer) {
+			fprintf(stderr, "cannot allocate %zu bytes for decoded frame %u\n",
+				frame_size, frame);
+			state.capture_errors++;
+			operation_failed = 1;
+			break;
+		}
+		if (copy_mp4_nv12_sample(sample, options, &video_info, frame_buffer,
+					 frame_size, reason, sizeof(reason)) != 0) {
+			fprintf(stderr, "cannot copy decoded MP4 frame %u: %s\n", frame, reason);
+			free(frame_buffer);
+			frame_buffer = NULL;
+			state.capture_errors++;
+			operation_failed = 1;
+			gst_sample_unref(sample);
+			sample = NULL;
+			break;
+		}
+		source_pts_valid = mp4_sample_pts_ns(sample, &source_pts_ns) == 0;
+		submitted = monotonic_ns();
+		pthread_mutex_lock(&state.metrics_lock);
+		record = &state.frames[frame];
+		record->frame_id = frame;
+		record->buffer_index = 0;
+		record->bytesused = (uint32_t)frame_size;
+		record->cpu_buffer = frame_buffer;
+		record->source_pts_ns = source_pts_ns;
+		record->submitted_ns = submitted;
+		record->state = FRAME_PENDING;
+		pthread_mutex_unlock(&state.metrics_lock);
+
+		memset(&image, 0, sizeof(image));
+		image.frameId = frame;
+		image.channelId = options->channel_id;
+		image.info = init_params.imageInfo;
+		image.dataAddr = frame_buffer;
+		image.dataPhyAddr = NULL;
+		image.dataFd = -1;
+		ret = ROCKIVA_PushFrame(handle, &image, NULL);
+		pthread_mutex_lock(&state.metrics_lock);
+		record->push_returned = 1;
+		if (ret != ROCKIVA_RET_SUCCESS) {
+			state.push_failures++;
+			failed_buffer = take_mp4_buffer_on_push_failure_locked(&state, frame);
+		} else {
+			state.pushed++;
+			state.accepted_frames++;
+			if (record->state == FRAME_PENDING)
+				record->state = FRAME_ACCEPTED;
+		}
+		signal_callbacks_locked(&state);
+		pthread_mutex_unlock(&state.metrics_lock);
+		if (failed_buffer)
+			free(failed_buffer);
+		gst_sample_unref(sample);
+		sample = NULL;
+		frame_buffer = NULL;
+		if (ret != ROCKIVA_RET_SUCCESS) {
+			fprintf(stderr, "push MP4 frame %u failed: %d\n", frame, ret);
+			operation_failed = 1;
+			break;
+		}
+		if (source_pts_valid)
+			log_printf(PROBE_OUTPUT_DETAIL,
+			       "mp4 frame_id=%u source_pts_ns=%" PRIu64
+			       " push_ret=%d\n", frame, source_pts_ns, ret);
+		else
+			log_printf(PROBE_OUTPUT_DETAIL,
+			       "mp4 frame_id=%u source_pts_ns=none push_ret=%d\n",
+			       frame, ret);
+		maybe_report_summary(&state, options->report_interval_ms, &next_report_ns);
+		sleep_for_mp4_frame(options->fps);
+	}
+	if (stop_requested)
+		operation_failed = 1;
+
+mp4_sdk_cleanup:
+	if (handle_initialized) {
+		int wait_result = wait_finish(handle, options->timeout_ms, "wait_finish");
+
+		if (wait_result < 0)
+			operation_failed = 1;
+		if (wait_result == 1 || wait_result == 0) {
+			if (wait_result == 1)
+				wait_result = drain_callbacks(&state, options->timeout_ms,
+							      "wait_finish");
+			else
+				wait_result = wait_for_callback_completion(&state,
+								options->timeout_ms);
+			if (wait_result != 0)
+				operation_failed = 1;
+			else
+				callback_complete = 1;
+		}
+		if (detect_initialized && callback_complete) {
+			ret = ROCKIVA_DETECT_Release(handle);
+			log_printf(PROBE_OUTPUT_SUMMARY, "detect_release ret=%d\n", ret);
+			if (ret != ROCKIVA_RET_SUCCESS)
+				operation_failed = 1;
+		}
+		if (callback_complete) {
+			int final_wait = wait_finish(handle, options->timeout_ms,
+						      "final_wait_finish");
+
+			if (final_wait == 0) {
+				final_cleanup_safe = 1;
+			} else if (final_wait == 1) {
+				if (drain_callbacks(&state, options->timeout_ms,
+							    "final_wait_finish") == 0)
+					final_cleanup_safe = 1;
+				else
+					operation_failed = 1;
+			} else {
+				operation_failed = 1;
+			}
+		}
+		if (final_cleanup_safe) {
+			ret = ROCKIVA_Release(handle);
+			log_printf(PROBE_OUTPUT_SUMMARY, "rockiva_release ret=%d\n", ret);
+			if (ret == ROCKIVA_RET_SUCCESS)
+				sdk_released = 1;
+			else
+				operation_failed = 1;
+		} else if (callback_complete) {
+			fprintf(stderr, "skipping ROCKIVA_Release after incomplete final wait\n");
+		}
+	}
+
+mp4_done:
+	if (first_sample)
+		gst_sample_unref(first_sample);
+	if (sample)
+		gst_sample_unref(sample);
+	if (metrics_lock_initialized)
+		pthread_mutex_lock(&state.metrics_lock);
+	if ((!options->frames || state.captures != options->frames) ||
+	    state.pushed != options->frames || state.accepted_frames != state.pushed ||
+	    state.samples_rejected != 0 || state.capture_errors != 0 ||
+	    state.push_failures != 0 || state.released_frames != state.accepted_frames ||
+	    state.detection_errors != 0 || state.detection_frame_errors != 0 ||
+	    state.detection_unmatched != 0 || state.detection_duplicates != 0 ||
+	    state.detection_object_overflows != 0 || state.release_unmatched != 0 ||
+	    state.release_duplicates != 0 || state.release_mismatches != 0 ||
+	    state.release_invalid_callbacks != 0 || state.channel_mismatches != 0)
+		operation_failed = 1;
+	if (!callbacks_complete_locked(&state)) {
+		fprintf(stderr, "callback accounting invariant failed: accepted=%" PRIu64
+			" detection_completed=%" PRIu64 " released=%" PRIu64 "\n",
+			state.accepted_frames, state.detection_completed_frames,
+			state.released_frames);
+		operation_failed = 1;
+	}
+	if (state.person_observations < options->min_person_observations) {
+		fprintf(stderr, "person observations below minimum: %" PRIu64 " < %u\n",
+			state.person_observations, options->min_person_observations);
+		operation_failed = 1;
+	}
+	if (state.person_tracking_observations < options->min_tracking_observations) {
+		fprintf(stderr, "person tracking observations below minimum: %" PRIu64
+			" < %u\n", state.person_tracking_observations,
+			options->min_tracking_observations);
+		operation_failed = 1;
+	}
+	if (handle_initialized && (!final_cleanup_safe || !sdk_released))
+		operation_failed = 1;
+	state_cleanup_safe = !handle_initialized ||
+		(final_cleanup_safe && sdk_released && callbacks_complete_locked(&state));
+	pipeline_cleanup_safe = state_cleanup_safe;
+	if (operation_failed || !pipeline_cleanup_safe)
+		log_printf(PROBE_OUTPUT_SUMMARY, "mp4 result=not_claimed\n");
+	else
+		log_printf(PROBE_OUTPUT_SUMMARY, "mp4 result=candidate_only_record_board_evidence\n");
+	printf("summary captures=%" PRIu64 " mode=mp4 stop=%s frame_slots=%zu "
+	       "qbufs=0 qbuf_failures=0 sequence_errors=0 capture_errors=%" PRIu64
+	       " samples_received=%" PRIu64 " samples_rejected=%" PRIu64
+	       " accepted=%" PRIu64 " pushed=%" PRIu64 " push_failures=%" PRIu64
+	       " detected=%" PRIu64 " detection_errors=%" PRIu64
+	       " detection_frame_errors=%" PRIu64 " released=%" PRIu64
+	       " release_unmatched=%" PRIu64 " release_duplicates=%" PRIu64
+	       " release_mismatches=%" PRIu64 " person=%" PRIu64
+	       " tracking=%" PRIu64 " fd_lifecycle=cpu-buffer t1=%s\n",
+	       state.captures, stop_requested ? "signal" : "limit", state.frame_count,
+	       state.capture_errors, state.samples_received, state.samples_rejected,
+	       state.accepted_frames,
+	       state.pushed, state.push_failures, state.detections,
+	       state.detection_errors, state.detection_frame_errors,
+	       state.released_frames, state.release_unmatched, state.release_duplicates,
+	       state.release_mismatches, state.person_observations,
+	       state.person_tracking_observations,
+	       operation_failed || !pipeline_cleanup_safe ? "not_claimed" :
+											  "candidate_only_record_board_evidence");
+	if (metrics_lock_initialized)
+		pthread_mutex_unlock(&state.metrics_lock);
+	if (state_cleanup_safe)
+		free_unreturned_mp4_buffers(&state);
+	if (source.pipeline && pipeline_cleanup_safe) {
+		if (source.started && stop_mp4_pipeline(&source, options->timeout_ms) != 0)
+			operation_failed = 1;
+		if (source.bus)
+			gst_object_unref(source.bus);
+		if (source.appsink)
+			gst_object_unref(source.appsink);
+		gst_object_unref(source.pipeline);
+	} else if (source.pipeline) {
+		fprintf(stderr, "leaving MP4 pipeline referenced until process exit because "
+			"SDK ownership was not proven released\n");
+	}
+	if (state_cleanup_safe) {
+		free(state.frames);
+		state.frames = NULL;
+	}
+	if (callbacks_cond_initialized && state_cleanup_safe)
+		(void)pthread_cond_destroy(&state.callbacks_cond);
+	if (metrics_lock_initialized && state_cleanup_safe)
+		(void)pthread_mutex_destroy(&state.metrics_lock);
+	(void)release_callback_initialized;
+	return operation_failed ? 1 : 0;
 }
 
 int main(int argc, char **argv)
@@ -1563,6 +2742,8 @@ int main(int argc, char **argv)
 	parse_result = parse_options(argc, argv, &options);
 	if (parse_result != 0)
 		return parse_result > 0 ? 0 : 2;
+	if (options.input_path)
+		return run_mp4_probe(&options);
 	configured_log_level = options.log_level;
 	if (install_stop_handlers() != 0) {
 		fprintf(stderr, "cannot install SIGINT/SIGTERM handlers: %s\n",
@@ -1591,6 +2772,7 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 	state.channel_id = options.channel_id;
+	state.input_kind = PROBE_INPUT_V4L2;
 	state.next_frame_id = 1;
 	log_printf(PROBE_OUTPUT_SUMMARY,
 	       "probe mode=v4l2-rockiva device=%s model=%s model_path=%s width=%u "

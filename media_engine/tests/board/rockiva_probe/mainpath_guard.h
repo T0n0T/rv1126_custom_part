@@ -7,6 +7,12 @@
 
 #define ROCKIVA_PROBE_MAINPATH "/dev/video24"
 
+#if defined(__GNUC__)
+#define ROCKIVA_PROBE_UNUSED __attribute__((unused))
+#else
+#define ROCKIVA_PROBE_UNUSED
+#endif
+
 /* Resolve aliases before allowing an independent probe to touch the mainpath. */
 static int rockiva_probe_is_mainpath(const char *device,
 					     const char *mainpath)
@@ -36,7 +42,8 @@ static int rockiva_probe_is_mainpath(const char *device,
 }
 
 /* Re-check the object actually opened, closing the path-check/open race. */
-static int rockiva_probe_fd_is_mainpath(int device_fd, const char *mainpath)
+static int ROCKIVA_PROBE_UNUSED rockiva_probe_fd_is_mainpath(int device_fd,
+								 const char *mainpath)
 {
 	struct stat device_stat;
 	struct stat mainpath_stat;
@@ -51,5 +58,7 @@ static int rockiva_probe_fd_is_mainpath(int device_fd, const char *mainpath)
 		return 0;
 	return device_stat.st_rdev == mainpath_stat.st_rdev ? 1 : 0;
 }
+
+#undef ROCKIVA_PROBE_UNUSED
 
 #endif

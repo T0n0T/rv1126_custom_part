@@ -1,6 +1,6 @@
 # T1 RV1126B RockIVA 探针结果
 
-日期：2026-08-28、2026-08-31、2026-09-01（Asia/Shanghai）
+日期：2026-08-28、2026-08-31、2026-09-01、2026-09-04（Asia/Shanghai）
 
 ## 范围与输入
 
@@ -227,6 +227,46 @@ LOG_LEVEL=events REPORT_INTERVAL_MS=1000 MIN_PERSON=1 MIN_TRACKING=1 \
 与 `tracking=630` 仍然只是跨帧观察次数，不能作为 15 人、725 人或任何唯一人流量。
 因此该结果只能作为 CLS8 对比/候选证据：它证明了 callback 和释放闭环，但不能
 解除 T1，也不能支持将 CLS8 固化到生产。PFP 继续保持下一阶段的暂定候选。
+
+## 2026-09-04 GStreamer MP4->RockIVA 人流测试源
+
+为验证离线视频可以通过板端解码器推进 RockIVA DET，停止板端
+`media_engine`（PID `574`）后，将 `/home/Tiger/Documents/rtsp_demo/test1.mp4`
+（H.264 Main、`768x432`、约 `59.94 FPS`、`11.878533 s`，SHA-256
+`b3559aebdf182fc0b35ca4009f0ae6ed776b6d577a6695666237ba911affd6d3`）上传为
+`/tmp/me/test1.mp4`。板端实际使用的解码/显示插件为
+`libgstrockchipmpp.so`（`mppvideodec`）和 `libgstkms.so`（`kmssink`）。
+
+启用显示分支运行 30 帧：
+
+```sh
+SOURCE=mp4 INPUT=/tmp/me/test1.mp4 MODEL_PATH=/oem/usr/lib \
+  ROCKIVA_LIB_DIR=/oem/usr/lib WIDTH=640 HEIGHT=640 FPS=10 FRAMES=30 \
+  MIN_PERSON=1 MIN_TRACKING=1 LOG_LEVEL=quiet REPORT_INTERVAL_MS=0 \
+  DISPLAY_OUTPUT=1 ./run_v4l2_rockiva_probe.sh
+```
+
+管线为 `filesrc ! qtdemux ! h264parse ! mppvideodec ! tee`；分析支路复制为
+紧凑 CPU `NV12` 后交给 RockIVA，显示支路使用
+`rgarotate(rotation=0,out=480x800) ! kmssink(connector=97,plane=75)`。
+结果如下：
+
+| 项目 | 结果 |
+| --- | --- |
+| 直接退出码 | `0` |
+| captures/samples/pushed/detected/released | `30/30/30/30/30` |
+| capture/push/detection/release 错误 | `0/0/0/0` |
+| person/tracking observations | `143/83`（观察次数，不是人数） |
+| SDK 收尾 | `WaitFinish=-5` 走有界 callback fallback；`DETECT_Release=0`、`ROCKIVA_Release=0` |
+| pipeline | `PLAYING -> NULL`，无 GStreamer 错误消息 |
+| 运行日志 SHA-256 | `353cdb9fddbdade9aebaaab407737f716aed63d9ab12ac27150a3a565349b512` |
+
+该结果证明了板端 MP4 解码、显示分支和 CPU-NV12->RockIVA 的一次候选闭环；没有
+抓取板端物理屏幕像素，因此“无 GStreamer 错误且完成 KMS 管线”不等同于显示器上
+像素结果已独立目视验收。运行期间 MPP 报告了源帧 stride/size mismatch 警告，RGA
+报告使用 legacy API；两者未导致本轮退出失败，但需要在进入生产分支前单独评估。
+此模式不是生产 DMA-BUF 输入，也不解除 T1 的多轮 DMA-BUF、完整流 epoch、主编码
+连续性、点播并发和资源预算门禁。
 
 ## 当前判定
 

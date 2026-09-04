@@ -3,10 +3,12 @@
 This directory contains a board-only validation tool. It is deliberately not
 linked into the production `media_engine` target.
 
-The probe reads tightly packed raw NV12 frames from a file, initializes
-RockIVA in `ROCKIVA_MODE_VIDEO`, enables the pure detection callback, pushes
+The raw-NV12 `rockiva_probe` reads tightly packed raw NV12 frames from a file,
+initializes RockIVA in `ROCKIVA_MODE_VIDEO`, enables the pure detection callback, pushes
 the requested number of frames (or runs until a stop signal in continuous
-mode), waits for completion, and prints (with a selectable verbosity):
+mode), waits for completion, and prints (with a selectable verbosity). The
+`v4l2_rockiva_probe` executable additionally supports native V4L2 capture and
+the MP4 test-source mode described below.
 
 - RockIVA version and selected initialization parameters;
 - each push result and frame ID at the default `all` log level;
@@ -86,13 +88,14 @@ failure, and SDK cleanup failures. These
 tests validate exit status and CPU-buffer ownership accounting, not RockIVA
 inference quality or board behavior.
 
-`make test` also runs `test_runner_guards.sh`. It copies the three capture
-runner scripts and a fake probe into a temporary directory, so the checks never
+`make test` also runs `test_runner_guards.sh`. It copies the board runner
+scripts and a fake probe into a temporary directory, so the checks never
 open a V4L2 node. The checks cover required environment variables, invalid
 `ALLOW_MAINPATH` values, safe default argument forwarding, explicit
 `--allow-mainpath` forwarding, and the `LD_LIBRARY_PATH`/`GST_PLUGIN_PATH`
-environment setup. This is a host-side runner contract test only; it does not
-prove the target device or RockIVA runtime is available.
+environment setup, including the MP4 decoder plugin scanner path. This is a
+host-side runner contract test only; it does not prove the target device or
+RockIVA runtime is available.
 
 ## Input and run
 
@@ -205,6 +208,44 @@ capture stops and SDK callbacks are drained with the existing per-run timeout
 before buffers, mappings, retained DMA-BUF fds and the original format are
 cleaned up. If callback completion cannot be proven, teardown remains deferred
 until process exit as in the finite probe.
+
+The same `v4l2_rockiva_probe` executable also accepts an MP4 test source. In
+this mode RockIVA does not parse the container: the board GStreamer pipeline
+uses `filesrc ! qtdemux ! h264parse ! mppvideodec`, then tees the decoded video
+into two branches. The analysis branch uses
+`videoconvert ! videoscale ! videorate ! video/x-raw,format=NV12` before the
+probe's `appsink`; the display branch reuses the production `media_engine`
+path, `rgarotate ! kmssink`, for the board screen. The probe copies each
+analysis sample to a tightly packed CPU buffer before calling
+`ROCKIVA_PushFrame`. The mode shares the RockIVA DET callbacks, person-state
+output and ownership checks with the native demo, but its analysis lifecycle is
+CPU-buffer based rather than V4L2 DMA-BUF.
+
+MP4 display is enabled by default and uses the same board values as
+`media_engine`: KMS connector `97`, plane `75`, and a `480x800` RGA output.
+Set `DISPLAY_OUTPUT=0` to run inference without opening the display branch.
+`CONNECTOR_ID`, `PLANE_ID`, `PREVIEW_ROTATION`, `PREVIEW_WIDTH` and
+`PREVIEW_HEIGHT` override the display settings when needed. A display-enabled
+run requires the board's `kmssink`, `librga` and `/dev/rga` runtime path.
+
+`real_time.mp4` is not tracked in this checkout. Set `INPUT` to an H.264 MP4
+that is available on the host, copy it to the board, and run a finite sample
+test. The current workspace example uses
+`/home/Tiger/Documents/rtsp_demo/test1.mp4`:
+
+```sh
+adb push /home/Tiger/Documents/rtsp_demo/test1.mp4 /tmp/me/test1.mp4
+SOURCE=mp4 INPUT=/tmp/me/test1.mp4 MODEL_PATH=/oem/usr/lib \
+  ROCKIVA_LIB_DIR=/oem/usr/lib WIDTH=640 HEIGHT=640 FPS=10 FRAMES=30 \
+  MIN_PERSON=1 MIN_TRACKING=1 ./run_v4l2_rockiva_probe.sh
+```
+
+For `SOURCE=mp4`, `INPUT` defaults to `/tmp/me/real_time.mp4`, the sample
+dimensions default to `640x640`, `FPS` to `10`, and `FRAMES` to `30`. The
+runner enables the `rgarotate ! kmssink` screen branch by default, sets
+`GST_PLUGIN_PATH` below `ROCKIVA_LIB_DIR` and defaults
+`GST_PLUGIN_SCANNER` to `/oem/usr/libexec/gstreamer-1.0/gst-plugin-scanner`.
+MP4 mode is finite and cannot use `CONTINUOUS` or `ALLOW_MAINPATH`.
 
 For the board runner, a low-noise interactive session is:
 
@@ -329,6 +370,7 @@ target: a synthetic host buffer would not exercise the V4L2 exporter and would
 make the DMA-BUF result misleading.
 
 The target links the staged `gstreamer-1.0`, `gstapp-1.0`, `gstvideo-1.0`,
-`gstallocators-1.0`, GLib and RockIVA libraries. The board also needs the
-matching GStreamer v4l2 plugin; set `GST_PLUGIN_PATH` explicitly if it is not
-under `${ROCKIVA_LIB_DIR}/gstreamer-1.0`.
+`gstallocators-1.0`, GLib, RockIVA and RGA libraries. The board also needs the
+matching GStreamer `mppvideodec`, `kmssink` and v4l2 plugins; set
+`GST_PLUGIN_PATH` explicitly if they are not under
+`${ROCKIVA_LIB_DIR}/gstreamer-1.0`.
