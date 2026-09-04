@@ -374,6 +374,48 @@ RockIVA; it does not prove that `/dev/video24` or the PID 576 production
 target: a synthetic host buffer would not exercise the V4L2 exporter and would
 make the DMA-BUF result misleading.
 
+### MP4 decoder-output mode
+
+`rockiva_dmabuf_probe` also accepts an MP4 input with `--input`. This is a
+separate decoder-output experiment from the camera mode above. The board
+pipeline is:
+
+```text
+filesrc location=PATH ! qtdemux ! h264parse !
+  mppvideodec(dma-feature=true) ! video/x-raw,format=NV12,width=W,height=H ! appsink
+```
+
+`mppvideodec` is the board decoder and the appsink allocation callback requests
+a single DMA-BUF-backed buffer. The probe passes that fd directly to
+`ROCKIVA_PushFrame`; it does not copy the sample to CPU memory and it does not
+open a V4L2 node. The MP4 DMA-BUF mode has no display branch. Use the
+`v4l2_rockiva_probe` MP4 mode above when the decoded clip must also be shown on
+the board screen through the reused `rgarotate ! kmssink` path.
+
+The runner defaults for this mode are `INPUT=/tmp/me/test1.mp4`, `768x432`,
+`FRAMES=30`, `FPS=10`, `MIN_PERSON=1` and `MIN_TRACKING=1`. The clip must already
+be present on the board:
+
+```sh
+make rockiva_dmabuf_probe SDK_ROOT=/home/Tiger/Documents/code/linux/rv1126b_sdk/rv1126b_linux_ipc_xiaoyu
+adb push /home/Tiger/Documents/rtsp_demo/test1.mp4 /tmp/me/test1.mp4
+SOURCE=mp4 INPUT=/tmp/me/test1.mp4 MODEL_PATH=/oem/usr/lib \
+  ROCKIVA_LIB_DIR=/oem/usr/lib WIDTH=768 HEIGHT=432 FPS=10 FRAMES=30 \
+  MIN_PERSON=1 MIN_TRACKING=1 ./run_dmabuf_probe.sh
+```
+
+In this mode `FPS` is retained as a requested/recorded probe parameter; the
+decoder-output pipeline does not use `videorate` to pace playback. This run
+therefore validates frame delivery and RockIVA ownership, not real-time
+throughput or an end-to-end 10 FPS budget.
+
+The final `mode=mp4-dmabuf` summary must show equal `samples_received`,
+`pushed`, `detection_callbacks` and `released_frames`, zero lifecycle/error
+counters, and at least the requested person/tracking observations. A successful
+run proves the board decoder-to-RockIVA DMA-BUF lifetime for this test source;
+it does not prove production `media_engine` integration, display output, image
+orientation, tracking-ID stability or event-engine delivery.
+
 The target links the staged `gstreamer-1.0`, `gstapp-1.0`, `gstvideo-1.0`,
 `gstallocators-1.0`, GLib, RockIVA and RGA libraries. The board also needs the
 matching GStreamer `mppvideodec`, `kmssink` and v4l2 plugins; set

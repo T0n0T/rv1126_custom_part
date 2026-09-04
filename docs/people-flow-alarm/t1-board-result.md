@@ -300,6 +300,46 @@ fallback 完成，`DETECT_Release=0`、`ROCKIVA_Release=0`。本轮画面没有�
 释放闭环成立，不是检测质量或人流验收。复测结束后只恢复了 `/dev/video25` 为
 `3840x2160` 单物理平面 `NV12`；`/dev/video24` 未被重配。
 
+## 2026-09-04 GStreamer MP4->RockIVA 解码输出 DMA-BUF
+
+为验证同一个人流测试源也能直接推进 RockIVA 的 DMA-BUF 输入，使用已上传到板端的
+`/tmp/me/test1.mp4`，通过 `rockiva_dmabuf_probe SOURCE=mp4` 运行三轮，每轮参数为
+PFP、`768x432`、30 帧、`FPS=10`、`coreMask=0x0`、`MIN_PERSON=1`、
+`MIN_TRACKING=1`。运行前后均确认 `media_engine` 未运行；本轮没有打开或重配
+`/dev/video24`，也没有启动生产媒体进程。
+
+管线为：
+
+```text
+filesrc ! qtdemux ! h264parse ! mppvideodec(dma-feature=true) !
+  video/x-raw,format=NV12,width=768,height=432 ! appsink
+```
+
+首帧协商为单个 DMA-BUF memory：`hstride=432`、`y_stride=768`、`uv_stride=768`、
+`y_offset=0`、`uv_offset=331776`、`logical_planes=2`、`video_meta=1`、
+`sample_size=497664`、`max_size=663552`。`ROCKIVA_WaitFinish=-5` 在每轮都通过有界
+callback completion fallback 完成收尾。
+
+| 运行 | 退出码 | samples/pushed/detect/release | person states | detect/release avg |
+| --- | ---: | --- | --- | --- |
+| 1 | 0 | `30/30/30/30` | `252` (`FIRST=13`, `TRACKING=231`, `LOST=8`) | `415.714/415.835 ms` |
+| 2 | 0 | `30/30/30/30` | `290` (`FIRST=19`, `TRACKING=241`, `LOST=20`, `DISPEAR=10`) | `398.468/398.607 ms` |
+| 3 | 0 | `30/30/30/30` | `252` (`FIRST=13`, `TRACKING=231`, `LOST=8`) | `412.904/413.026 ms` |
+
+三轮的 `samples_rejected`、push/detection/release 错误、ownership mismatch、
+unmatched/duplicate/invalid 和 `channel_mismatches` 均为 `0`，`DETECT_Release=0`、
+`ROCKIVA_Release=0`，管线均完成 `PLAYING -> NULL`。原始日志为
+`/tmp/rockiva_mp4_dmabuf_run1.log`、`/tmp/rockiva_mp4_dmabuf_run2.log` 和
+`/tmp/rockiva_mp4_dmabuf_run3.log`，SHA-256 分别为
+`d3540ac08001adeb7a8c99a1758f14b858095d36f7d11c9dfb3168bf3605dd84`、
+`243cd1dbfa292f23f65493d695ace7a09c710991040bfe1af0fa9d3ee5d62ca7` 和
+`b3efac2469ec0d30fb6f905882198344e9d3388e4db2b26467025469d3df8bde`。
+
+这证明了板端 `mppvideodec` 解码输出的单 fd DMA-BUF 可以被 RockIVA 连续接收、检测
+并按 release callback 归还；它不是屏幕显示路径，也没有证明实时 10 FPS 吞吐、生产
+`media_engine` 分支、完整流纪元、主编码并发或事件引擎投递。这里的 `person` 和
+`tracking` 是跨帧观察次数，不是唯一人数或进出流量。
+
 ## 当前判定
 
 - PFP 是下一阶段的暂定候选：CPU-NV12 片段、`test1.mp4` 人群压力样本和一轮 60 帧
@@ -317,15 +357,17 @@ fallback 完成，`DETECT_Release=0`、`ROCKIVA_Release=0`。本轮画面没有�
   未变化；这只说明本次短时复测未观察到主进程退出或主路径 FD 变化，不能替代编码
   连续性、主路径 sequence 或点播回归。
 - GStreamer DMA-BUF runner 已能在隔离节点产出单个带 fd 的 DMA-BUF sample，并完成
-  30 帧空场景的 RockIVA callback/release 闭环；这解决了探针自身的输入内存类型
-  阻塞，但仍需有人场景、多轮重复、完整流 epoch 和生产 GStreamer 分支验证。
-  原生 V4L2 有人场景结果和本轮 GStreamer 空场景结果都不能单独解除 T1。
+  30 帧空场景的 RockIVA callback/release 闭环；同日的 MP4 解码输出模式又完成三轮
+  有人片段的 `30/30/30/30` 闭环。这解决了探针自身的输入内存类型阻塞，并提供了
+  人流测试源的 RockIVA 检出观察，但仍需真实采集有人场景、多轮完整流 epoch 和生产
+  GStreamer 分支验证。上述结果都不能单独解除 T1。
 
 ## 未解除的 T1 门禁
 
-1. 多轮有人场景下的 DMA-BUF 检出、`objId/state` 生命周期和稳定性；PFP 当前只有一轮
-   原生 V4L2 60 帧候选证据，本轮 GStreamer 30 帧为空场景，CLS8 的 900 帧对比又
-   出现 `sequence_errors=53` 和明显 ID 重建，两者都不足以形成 T1 通过证据。
+1. 多轮真实采集有人场景下的 DMA-BUF 检出、`objId/state` 生命周期和稳定性；MP4
+   解码输出三轮有人片段只证明测试源的 decoder-to-RockIVA 闭环，不替代真实采集，
+   PFP 当前仍只有一轮原生 V4L2 60 帧候选证据，CLS8 的 900 帧对比又出现
+   `sequence_errors=53` 和明显 ID 重建，均不足以形成 T1 通过证据。
 2. 当前仅有两次短时隔离停止/重启的 callback 计数证据；流 epoch 切换、停止时的
    异步回调、无泄漏/UAF 和长期重复启停仍未证明。
 3. 与主编码/点播并发时的帧率、丢帧、CPU/NPU、温度和内存预算。

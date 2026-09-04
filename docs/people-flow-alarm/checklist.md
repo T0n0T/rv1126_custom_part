@@ -42,6 +42,10 @@
       `GstDmaBufMemory`（`640x360`、`sample_size=345600`、`logical_planes=2`），
       完成 30 帧 `samples/pushed/detection/release=30/30/30/30`，所有 ownership
       和 SDK 收尾错误为 0；本轮为空场景，只证明输入类型和生命周期。
+- [x] 2026-09-04 `rockiva_dmabuf_probe SOURCE=mp4` 使用板端 `mppvideodec` 输出的
+      单个 DMA-BUF，针对 `test1.mp4` 连续三轮完成 `30/30/30/30` 样本/推理/检测/
+      释放闭环，`person=252/290/252`，所有 ownership 和 SDK 收尾错误为 0；该结果
+      只证明测试源的 decoder-to-RockIVA 输入链路，不证明实时吞吐、显示、生产分支或 T1。
 - [x] DMA-BUF 场景下 person 检出和 `objId/state` 变化已有一轮录制结果；2026-09-01
       原生 V4L2 60 帧运行为 `person=58 tracking=50`，并观察到
       `FIRST/TRACKING/LOST/DISPEAR`。这只是单轮候选证据，真实采集流纪元和长期稳定性

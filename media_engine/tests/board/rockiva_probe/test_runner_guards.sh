@@ -114,6 +114,10 @@ expect_failure_contains dmabuf-invalid-mainpath 'ALLOW_MAINPATH must be 0 or 1' 
 	env -i PATH="$PATH_VALUE" DEVICE=/tmp/selfpath WIDTH=640 HEIGHT=360 \
 	FRAMES=1 MODEL_PATH=/tmp/model FPS=10 ALLOW_MAINPATH=2 \
 	sh "$DMABUF_DIR/run_dmabuf_probe.sh"
+expect_failure_contains dmabuf-mp4-mainpath-forbidden \
+	'ALLOW_MAINPATH is only supported with SOURCE=v4l2' \
+	env -i PATH="$PATH_VALUE" SOURCE=mp4 MODEL_PATH=/tmp/model \
+	ALLOW_MAINPATH=1 sh "$DMABUF_DIR/run_dmabuf_probe.sh"
 
 EXPBUF_TRACE=$TMP_DIR/expbuf.trace
 env -i PATH="$PATH_VALUE" TRACE_FILE="$EXPBUF_TRACE" \
@@ -153,6 +157,19 @@ env -i PATH="$PATH_VALUE" TRACE_FILE="$DMABUF_TRACE" \
 expect_contains dmabuf-safe-device 'arg=/tmp/selfpath' "$DMABUF_TRACE"
 expect_contains dmabuf-plugin-path \
 	'GST_PLUGIN_PATH=/opt/rockiva/gstreamer-1.0' "$DMABUF_TRACE"
+
+DMABUF_MP4_TRACE=$TMP_DIR/dmabuf-mp4.trace
+env -i PATH="$PATH_VALUE" TRACE_FILE="$DMABUF_MP4_TRACE" \
+	SOURCE=mp4 INPUT=/tmp/me/test1.mp4 MODEL_PATH=/tmp/model \
+	ROCKIVA_LIB_DIR=/opt/rockiva WIDTH=768 HEIGHT=432 FRAMES=4 FPS=10 \
+	sh "$DMABUF_DIR/run_dmabuf_probe.sh"
+expect_contains dmabuf-mp4-input 'arg=/tmp/me/test1.mp4' "$DMABUF_MP4_TRACE"
+expect_absent dmabuf-mp4-no-device 'arg=--device' "$DMABUF_MP4_TRACE"
+expect_contains dmabuf-mp4-plugin-path \
+	'GST_PLUGIN_PATH=/opt/rockiva/gstreamer-1.0' "$DMABUF_MP4_TRACE"
+expect_contains dmabuf-mp4-plugin-scanner \
+	'GST_PLUGIN_SCANNER=/oem/usr/libexec/gstreamer-1.0/gst-plugin-scanner' \
+	"$DMABUF_MP4_TRACE"
 
 MP4_TRACE=$TMP_DIR/mp4.trace
 env -i PATH="$PATH_VALUE" TRACE_FILE="$MP4_TRACE" \
@@ -257,5 +274,13 @@ expect_contains rockiva-dmabuf-allocation-param \
 	'gst_query_add_allocation_param' "$SCRIPT_DIR/rockiva_dmabuf_probe.c"
 expect_contains rockiva-dmabuf-heap-allocation \
 	'DMA_HEAP_IOCTL_ALLOC' "$SCRIPT_DIR/rockiva_dmabuf_probe.c"
+expect_contains rockiva-dmabuf-mp4-mpp-decoder \
+	'gst_element_factory_make("mppvideodec"' \
+	"$SCRIPT_DIR/rockiva_dmabuf_probe.c"
+expect_contains rockiva-dmabuf-mp4-dmabuf-output \
+	'"dma-feature", TRUE' "$SCRIPT_DIR/rockiva_dmabuf_probe.c"
+expect_contains rockiva-dmabuf-mp4-input-parser \
+	'options->input_kind == PROBE_INPUT_MP4' \
+	"$SCRIPT_DIR/rockiva_dmabuf_probe.c"
 
 printf '%s\n' '[PASS] runner guard checks complete without opening a V4L2 device'

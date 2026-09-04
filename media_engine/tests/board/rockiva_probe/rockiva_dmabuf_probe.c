@@ -1,8 +1,10 @@
 /*
- * RockIVA camera DMA-BUF probe (test tool only).
+ * RockIVA DMA-BUF probe (test tool only).
  *
- * This program owns an independent v4l2src/appsink pipeline.  It is not part
- * of media_engine and must not be used with the production capture pipeline.
+ * This program owns an independent GStreamer/appsink pipeline.  Its V4L2 mode
+ * uses an independent capture node, and its MP4 mode uses decoder output.  It
+ * is not part of media_engine and must not be used with the production
+ * capture pipeline.
  * RockIVA receives only the DMA-BUF fd; the GStreamer buffer reference kept by
  * this probe is released only by a matching RockIVA frame-release callback.
  */
@@ -50,8 +52,15 @@
  * been stable since the dmabuf mode was introduced. */
 #define GST_V4L2_IO_MODE_DMABUF 4
 
+enum probe_input_kind {
+	PROBE_INPUT_V4L2 = 0,
+	PROBE_INPUT_MP4,
+};
+
 struct probe_options {
 	const char *device;
+	const char *input_path;
+	enum probe_input_kind input_kind;
 	const char *model_path;
 	unsigned int width;
 	unsigned int height;
@@ -396,9 +405,10 @@ static int parse_positive_uint(const char *value, unsigned int *out)
 
 static void usage(const char *program)
 {
-	printf("usage: %s --device PATH --model-path DIR --width N --height N "
+	printf("usage: %s (--device PATH | --input MP4) --model-path DIR --width N --height N "
 	       "--frames N --fps N [options]\n", program);
-	printf("  --device PATH           independent V4L2 capture device (required)\n");
+	printf("  --device PATH           independent V4L2 capture device\n");
+	printf("  --input MP4             H.264 MP4 decoded to DMA-BUF (test source)\n");
 	printf("  --allow-mainpath        explicitly permit /dev/video24 (unsafe)\n");
 	printf("  --model-path DIR        RockIVA model directory (required)\n");
 	printf("  --width N               requested NV12 width (required)\n");
@@ -422,6 +432,7 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 {
 	static const struct option long_options[] = {
 		{"device", required_argument, NULL, 'd'},
+		{"input", required_argument, NULL, 'u'},
 		{"allow-mainpath", no_argument, NULL, 'a'},
 		{"model-path", required_argument, NULL, 'm'},
 		{"width", required_argument, NULL, 'w'},
@@ -438,12 +449,15 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 		{NULL, 0, NULL, 0},
 	};
 	int option;
+	int have_device = 0;
+	int have_input = 0;
 	int have_width = 0;
 	int have_height = 0;
 	int have_frames = 0;
 	int have_fps = 0;
 
 	memset(options, 0, sizeof(*options));
+	options->input_kind = PROBE_INPUT_V4L2;
 	options->channel_id = DEFAULT_CHANNEL;
 	options->core_mask = DEFAULT_CORE_MASK;
 	options->model = DEFAULT_MODEL;
@@ -451,11 +465,17 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 	options->min_person_observations = DEFAULT_MIN_PERSON_OBSERVATIONS;
 	options->min_tracking_observations = DEFAULT_MIN_TRACKING_OBSERVATIONS;
 
-	while ((option = getopt_long(argc, argv, "dam:w:h:n:f:M:c:k:t:p:r:H?",
-				    long_options, NULL)) != -1) {
+	while ((option = getopt_long(argc, argv, "du:am:w:h:n:f:M:c:k:t:p:r:H?",
+					long_options, NULL)) != -1) {
 		switch (option) {
 		case 'd':
 			options->device = optarg;
+			have_device = 1;
+			break;
+		case 'u':
+			options->input_path = optarg;
+			options->input_kind = PROBE_INPUT_MP4;
+			have_input = 1;
 			break;
 		case 'a':
 			options->allow_mainpath = 1;
@@ -520,13 +540,19 @@ static int parse_options(int argc, char **argv, struct probe_options *options)
 		}
 	}
 
-	if (optind != argc || !options->device || !options->device[0] ||
+	if (optind != argc || (have_device == have_input) ||
+	    (have_device && (!options->device || !options->device[0])) ||
+	    (have_input && (!options->input_path || !options->input_path[0])) ||
 	    !options->model_path || !options->model_path[0] || !have_width ||
 	    !have_height || !have_frames || !have_fps || options->width % 2 != 0 ||
 	    options->height % 2 != 0 || options->fps > ROCKIVA_MAX_FRAMERATE ||
 	    options->frames == UINT32_MAX)
 		return -1;
-	if (rockiva_probe_is_mainpath(options->device, ROCKIVA_PROBE_MAINPATH) &&
+	if (have_input && options->allow_mainpath) {
+		fprintf(stderr, "--allow-mainpath is only valid with --device\n");
+		return -1;
+	}
+	if (have_device && rockiva_probe_is_mainpath(options->device, ROCKIVA_PROBE_MAINPATH) &&
 	    !options->allow_mainpath) {
 		fprintf(stderr, "refusing production mainpath %s; pass --allow-mainpath "
 			"only for an explicitly approved experiment\n", options->device);
@@ -822,47 +848,101 @@ static void describe_sample_memories(GstBuffer *buffer)
 	}
 }
 
+static void on_mp4_demux_pad_added(GstElement *demux, GstPad *new_pad,
+					   gpointer user_data)
+{
+	GstElement *parser = GST_ELEMENT(user_data);
+	GstCaps *caps = NULL;
+	const GstStructure *structure;
+	const gchar *name = NULL;
+	GstPad *sink_pad;
+	GstPadLinkReturn link_result;
+
+	(void)demux;
+	caps = gst_pad_get_current_caps(new_pad);
+	if (!caps)
+		caps = gst_pad_query_caps(new_pad, NULL);
+	if (caps && gst_caps_get_size(caps) > 0) {
+		structure = gst_caps_get_structure(caps, 0);
+		name = gst_structure_get_name(structure);
+	}
+	if ((!name || !g_str_has_prefix(name, "video/")) &&
+	    !g_str_has_prefix(GST_PAD_NAME(new_pad), "video")) {
+		if (caps)
+			gst_caps_unref(caps);
+		return;
+	}
+	sink_pad = gst_element_get_static_pad(parser, "sink");
+	if (!sink_pad) {
+		if (caps)
+			gst_caps_unref(caps);
+		fprintf(stderr, "cannot obtain h264parse sink pad\n");
+		return;
+	}
+	if (!gst_pad_is_linked(sink_pad)) {
+		link_result = gst_pad_link(new_pad, sink_pad);
+		if (link_result != GST_PAD_LINK_OK)
+			fprintf(stderr, "failed to link MP4 video pad: %s\n",
+				gst_pad_link_get_name(link_result));
+	}
+	gst_object_unref(sink_pad);
+	if (caps)
+		gst_caps_unref(caps);
+}
+
 static GstElement *create_pipeline(const struct probe_options *options)
 {
 	GstElement *pipeline = NULL;
 	GstElement *source = NULL;
+	GstElement *demux = NULL;
+	GstElement *parser = NULL;
+	GstElement *decoder = NULL;
 	GstElement *capsfilter = NULL;
 	GstElement *appsink = NULL;
 	GstCaps *caps = NULL;
 	GstAppSinkCallbacks callbacks = { 0 };
+	int elements_added = 0;
 
-	pipeline = gst_pipeline_new("rockiva-dmabuf-probe");
-	source = gst_element_factory_make("v4l2src", "probe-source");
+	if (options->input_kind == PROBE_INPUT_MP4) {
+		pipeline = gst_pipeline_new("rockiva-mp4-dmabuf-probe");
+		source = gst_element_factory_make("filesrc", "mp4-source");
+		demux = gst_element_factory_make("qtdemux", "mp4-demux");
+		parser = gst_element_factory_make("h264parse", "mp4-parser");
+		decoder = gst_element_factory_make("mppvideodec", "mp4-decoder");
+	} else {
+		pipeline = gst_pipeline_new("rockiva-dmabuf-probe");
+		source = gst_element_factory_make("v4l2src", "probe-source");
+	}
 	capsfilter = gst_element_factory_make("capsfilter", "probe-caps");
 	appsink = gst_element_factory_make("appsink", "probe-sink");
-	if (!pipeline || !source || !capsfilter || !appsink) {
+	if (!pipeline || !source || !capsfilter || !appsink ||
+	    (options->input_kind == PROBE_INPUT_MP4 &&
+	     (!demux || !parser || !decoder))) {
 		fprintf(stderr, "required GStreamer elements are unavailable\n");
-		if (pipeline)
-			gst_object_unref(pipeline);
-		if (source)
-			gst_object_unref(source);
-		if (capsfilter)
-			gst_object_unref(capsfilter);
-		if (appsink)
-			gst_object_unref(appsink);
-		return NULL;
+		goto create_failed;
 	}
 
-	/* This is the capture/export mode, not dmabuf-import. */
-	g_object_set(source, "device", options->device,
-		     "io-mode", GST_V4L2_IO_MODE_DMABUF, NULL);
-	caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "NV12",
-				   "width", G_TYPE_INT, (gint)options->width,
-				   "height", G_TYPE_INT, (gint)options->height,
-				   "framerate", GST_TYPE_FRACTION, (gint)options->fps, 1,
-				   NULL);
+	if (options->input_kind == PROBE_INPUT_MP4) {
+		/* MP4 mode is a decoder-output experiment, not a V4L2 import path. */
+		g_object_set(source, "location", options->input_path, NULL);
+		g_object_set(decoder, "arm-afbc", FALSE, "dma-feature", TRUE, NULL);
+		caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "NV12",
+					   "width", G_TYPE_INT, (gint)options->width,
+					   "height", G_TYPE_INT, (gint)options->height,
+					   "interlace-mode", G_TYPE_STRING, "progressive", NULL);
+	} else {
+		/* This is the capture/export mode, not dmabuf-import. */
+		g_object_set(source, "device", options->device,
+			     "io-mode", GST_V4L2_IO_MODE_DMABUF, NULL);
+		caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "NV12",
+					   "width", G_TYPE_INT, (gint)options->width,
+					   "height", G_TYPE_INT, (gint)options->height,
+					   "framerate", GST_TYPE_FRACTION, (gint)options->fps, 1,
+					   NULL);
+	}
 	if (!caps) {
 		fprintf(stderr, "cannot allocate DMA-BUF caps\n");
-		gst_object_unref(appsink);
-		gst_object_unref(capsfilter);
-		gst_object_unref(source);
-		gst_object_unref(pipeline);
-		return NULL;
+		goto create_failed;
 	}
 	g_object_set(capsfilter, "caps", caps, NULL);
 	gst_caps_unref(caps);
@@ -872,17 +952,62 @@ static GstElement *create_pipeline(const struct probe_options *options)
 	callbacks.propose_allocation = propose_allocation;
 	gst_app_sink_set_callbacks(GST_APP_SINK(appsink), &callbacks, NULL, NULL);
 
-	gst_bin_add_many(GST_BIN(pipeline), source, capsfilter, appsink, NULL);
-	if (!gst_element_link_many(source, capsfilter, appsink, NULL)) {
-		fprintf(stderr, "failed to link v4l2src -> capsfilter -> appsink\n");
-		gst_object_unref(pipeline);
-		return NULL;
+	if (options->input_kind == PROBE_INPUT_MP4) {
+		gst_bin_add_many(GST_BIN(pipeline), source, demux, parser, decoder,
+				 capsfilter, appsink, NULL);
+	} else {
+		gst_bin_add_many(GST_BIN(pipeline), source, capsfilter, appsink, NULL);
 	}
-	printf("pipeline=v4l2src device=%s io-mode=dmabuf ! "
-	       "video/x-raw,format=NV12,width=%u,height=%u,"
-	       "framerate=%u/1 ! appsink\n",
-	       options->device, options->width, options->height, options->fps);
+	elements_added = 1;
+	if (options->input_kind == PROBE_INPUT_MP4) {
+		if (!gst_element_link(source, demux) ||
+		    !gst_element_link(parser, decoder) ||
+		    !gst_element_link_many(decoder, capsfilter, appsink, NULL)) {
+			fprintf(stderr, "failed to link MP4 DMA-BUF pipeline\n");
+			goto pipeline_failed;
+		}
+		g_signal_connect(demux, "pad-added",
+				 G_CALLBACK(on_mp4_demux_pad_added), parser);
+		printf("pipeline=filesrc location=%s ! qtdemux ! h264parse ! "
+		       "mppvideodec(dma-feature=true) ! "
+		       "video/x-raw,format=NV12,width=%u,height=%u "
+		       "appsink\n", options->input_path, options->width,
+		       options->height);
+	} else {
+		if (!gst_element_link_many(source, capsfilter, appsink, NULL)) {
+			fprintf(stderr, "failed to link v4l2src -> capsfilter -> appsink\n");
+			goto pipeline_failed;
+		}
+		printf("pipeline=v4l2src device=%s io-mode=dmabuf ! "
+		       "video/x-raw,format=NV12,width=%u,height=%u,"
+		       "framerate=%u/1 ! appsink\n",
+		       options->device, options->width, options->height, options->fps);
+	}
 	return pipeline;
+
+pipeline_failed:
+	if (elements_added)
+		gst_object_unref(pipeline);
+	return NULL;
+
+create_failed:
+	if (caps)
+		gst_caps_unref(caps);
+	if (pipeline)
+		gst_object_unref(pipeline);
+	if (appsink)
+		gst_object_unref(appsink);
+	if (capsfilter)
+		gst_object_unref(capsfilter);
+	if (decoder)
+		gst_object_unref(decoder);
+	if (parser)
+		gst_object_unref(parser);
+	if (demux)
+		gst_object_unref(demux);
+	if (source)
+		gst_object_unref(source);
+	return NULL;
 }
 
 static void report_bus_message(GstMessage *message)
@@ -1313,13 +1438,23 @@ int main(int argc, char **argv)
 	memset(&det_params, 0, sizeof(det_params));
 	det_params.detObjectType = ROCKIVA_OBJECT_TYPE_BITMASK(ROCKIVA_OBJECT_TYPE_PERSON);
 
-	printf("probe mode=dmabuf model=%s device=%s model_path=%s width=%u height=%u "
-	       "frames=%u fps=%u channel=%u core_mask=0x%x min_person=%u "
-	       "min_tracking=%u\n",
-	       model_name(options.model), options.device, options.model_path,
-	       options.width, options.height, options.frames, options.fps,
-	       options.channel_id, options.core_mask,
-	       options.min_person_observations, options.min_tracking_observations);
+	if (options.input_kind == PROBE_INPUT_MP4) {
+		printf("probe mode=mp4-dmabuf model=%s input=%s model_path=%s "
+		       "width=%u height=%u frames=%u fps=%u channel=%u core_mask=0x%x "
+		       "min_person=%u min_tracking=%u\n",
+		       model_name(options.model), options.input_path, options.model_path,
+		       options.width, options.height, options.frames, options.fps,
+		       options.channel_id, options.core_mask,
+		       options.min_person_observations, options.min_tracking_observations);
+	} else {
+		printf("probe mode=dmabuf model=%s device=%s model_path=%s width=%u height=%u "
+		       "frames=%u fps=%u channel=%u core_mask=0x%x min_person=%u "
+		       "min_tracking=%u\n",
+		       model_name(options.model), options.device, options.model_path,
+		       options.width, options.height, options.frames, options.fps,
+		       options.channel_id, options.core_mask,
+		       options.min_person_observations, options.min_tracking_observations);
+	}
 	ret = ROCKIVA_GetVersion(MAX_VERSION, version);
 	printf("rockiva version ret=%d value=%s\n", ret,
 	       version[0] ? version : "(unavailable)");
@@ -1552,7 +1687,7 @@ done:
 	}
 	if (handle_initialized && (!final_cleanup_safe || !release_succeeded))
 		operation_failed = 1;
-	printf("summary samples_received=%" PRIu64 " samples_rejected=%" PRIu64
+	printf("summary mode=%s samples_received=%" PRIu64 " samples_rejected=%" PRIu64
 	       " pushed=%" PRIu64 " push_failures=%" PRIu64
 	       " detection_callbacks=%" PRIu64 " detection_errors=%" PRIu64
 	       " person=%" PRIu64 " person_states[first=%" PRIu64
@@ -1563,6 +1698,7 @@ done:
 	       " release_invalid=%" PRIu64 " channel_mismatches=%" PRIu64
 	       " detect_latency_ms[min=%.3f max=%.3f avg=%.3f]"
 	       " release_latency_ms[min=%.3f max=%.3f avg=%.3f]\n",
+	       options.input_kind == PROBE_INPUT_MP4 ? "mp4-dmabuf" : "dmabuf",
 	       state.samples_received, state.samples_rejected, state.pushed,
 	       state.push_failures, state.detections, state.detection_errors,
 	       state.person_observations, state.person_first_observations,
