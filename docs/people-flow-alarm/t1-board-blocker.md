@@ -1,19 +1,21 @@
 # T1 真板连接与资源阻塞记录
 
-记录日期：2026-08-27 起，最近更新：2026-09-01（Asia/Shanghai）
+记录日期：2026-08-27 起，最近更新：2026-09-04（Asia/Shanghai）
 
 > 2026-08-28 已通过 ADB 恢复真板连接并完成 CPU-NV12 RockIVA 探针；2026-08-31
 > 又完成隔离 `/dev/video25` 的原生 V4L2 DMA-BUF 生命周期探针，2026-09-01
-> 取得一轮 60 帧有人场景结果。连接阻塞已解除，但 T1 仍未完成：代表性重复场景、
-> 完整流边界和主视频隔离仍是硬门禁。实测结果见
+> 取得一轮 60 帧有人场景结果；2026-09-04 又完成 GStreamer 单内存 DMA-BUF
+> 拷贝路径的 30 帧空场景生命周期复测。连接阻塞已解除，但 T1 仍未完成：代表性
+> 重复场景、完整流边界和主视频隔离仍是硬门禁。实测结果见
 > `t1-board-result.md`。
 
 ## 2026-08-31 起设备资源上限暂停
 
-当前设备资源已达到本轮允许上限，暂停更高占用和并发板端复测；不再增加
-RockIVA、V4L2 或采集管线占用，也不操作 `/dev/video24`。本轮仅保留一轮短时
-60 帧有人场景结果作为候选证据。这是设备资源/测试窗口上限导致的暂停，不是
-RockIVA 检测失败：
+当前设备资源已达到本轮允许上限；除 2026-09-04 已完成的一次低占用 GStreamer
+DMA-BUF 生命周期复测外，暂停更高占用和并发板端复测，不再增加 RockIVA、V4L2
+或采集管线占用，也不操作 `/dev/video24`。本轮保留一轮短时 60 帧有人场景结果，
+并补充一轮 30 帧 GStreamer 空场景结果作为输入协商证据。这是设备资源/测试窗口
+上限导致的暂停，不是 RockIVA 检测失败：
 
 - CPU-NV12 有人片段已经取得 person 检出、`FIRST/TRACKING/LOST/DISPEAR` 状态和
   回调释放闭环的正向证据；
@@ -23,9 +25,32 @@ RockIVA 检测失败：
   release 生命周期及短时停止/重启证据；
 - 已取得一轮有人场景下的 DMA-BUF 检出/tracking 候选结果，但仍缺少代表性重复场景、
   完整流 epoch（含异步停止回调和长期重复启停）以及主编码连续性/点播并发证据。
+- GStreamer `/dev/video25` 探针已用 dma-heap 下游分配器获得单个 DMA-BUF memory，
+  完成 30 帧 `samples/pushed/detection/release=30/30/30/30`；该轮为空场景，
+  不提供 person/tracking 证据。
 
 因此 T1 保持 `in progress`，T3 继续保持阻塞。资源恢复前不得用单次候选结果、空场景、
 CPU-NV12 结果或已有生命周期结果替代完整验收边界。
+
+## 2026-09-04 GStreamer DMA-BUF 复测
+
+使用最新交叉编译的 `rockiva_dmabuf_probe`，仅向 `/dev/video25` 请求
+`640x360`、30 帧、PFP、`coreMask=0x0`，将 `MIN_PERSON` 和 `MIN_TRACKING` 设为
+零以隔离验证内存/释放生命周期。allocation callback 使用
+`/dev/dma_heap/system-uncached`，输出为单个 memory：
+
+```text
+appsink allocation=single-memory-dmabuf-copy heap=/dev/dma_heap/system-uncached size=345600
+negotiated ... logical_planes=2 video_meta=0 sample_size=345600 max_size=345600 fd=18
+summary samples_received=30 samples_rejected=0 pushed=30 detection_callbacks=30
+  released_frames=30 release_unmatched=0 release_duplicates=0 release_mismatches=0
+```
+
+探针直接退出码为 `0`，且 `DETECT_Release`、`ROCKIVA_Release` 成功；板端该隔离
+画面没有人员，所以这轮只关闭了此前“GStreamer sample 不是 DMA-BUF”的输入类型
+阻塞，仍不能解除有人场景、多轮稳定性、完整流 epoch、主路径连续性和生产分支门禁。
+测试结束后 `/dev/video25` 已恢复为 `3840x2160` 单物理平面 `NV12`，未启动或停止
+`media_engine`，也未重配 `/dev/video24`。
 
 ## 资源恢复后的最小 DMA-BUF 复测入口
 

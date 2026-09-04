@@ -11,6 +11,7 @@
 #define _XOPEN_SOURCE 700
 
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -19,13 +20,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <gst/gst.h>
 #include <gst/allocators/gstdmabuf.h>
 #include <gst/app/gstappsink.h>
+#include <gst/video/gstvideopool.h>
 #include <gst/video/video.h>
 #include <gst/video/gstvideometa.h>
+#include <linux/dma-heap.h>
 
 #include "rockiva/rockiva_common.h"
 #include "rockiva/rockiva_det_api.h"
@@ -38,6 +43,8 @@
 #define DEFAULT_MIN_PERSON_OBSERVATIONS 0U
 #define DEFAULT_MIN_TRACKING_OBSERVATIONS 0U
 #define MAX_VERSION 128U
+#define DMA_HEAP_UNCACHED "/dev/dma_heap/system-uncached"
+#define DMA_HEAP_CACHED "/dev/dma_heap/system"
 
 /* GstV4l2IOMode is private to the v4l2 plugin; its public property enum has
  * been stable since the dmabuf mode was introduced. */
@@ -150,6 +157,103 @@ struct probe_state {
 	uint64_t release_latency_min_ns;
 	uint64_t release_latency_max_ns;
 };
+
+typedef struct _ProbeDmaBufAllocator ProbeDmaBufAllocator;
+typedef struct _ProbeDmaBufAllocatorClass ProbeDmaBufAllocatorClass;
+
+struct _ProbeDmaBufAllocator {
+	GstDmaBufAllocator parent;
+	int heap_fd;
+	const char *heap_path;
+};
+
+struct _ProbeDmaBufAllocatorClass {
+	GstDmaBufAllocatorClass parent_class;
+};
+
+#define PROBE_TYPE_DMABUF_ALLOCATOR (probe_dmabuf_allocator_get_type())
+#define PROBE_DMABUF_ALLOCATOR(obj) \
+	(G_TYPE_CHECK_INSTANCE_CAST((obj), PROBE_TYPE_DMABUF_ALLOCATOR, \
+			ProbeDmaBufAllocator))
+
+G_DEFINE_TYPE(ProbeDmaBufAllocator, probe_dmabuf_allocator,
+		GST_TYPE_DMABUF_ALLOCATOR)
+
+static GstMemory *probe_dmabuf_alloc(GstAllocator *allocator, gsize size,
+					 GstAllocationParams *params)
+{
+	ProbeDmaBufAllocator *probe_allocator = PROBE_DMABUF_ALLOCATOR(allocator);
+	struct dma_heap_allocation_data allocation = { 0 };
+	GstMemory *memory;
+	gsize total_size;
+
+	if (!params || size > G_MAXSIZE - params->prefix ||
+	    size + params->prefix > G_MAXSIZE - params->padding ||
+	    probe_allocator->heap_fd < 0)
+		return NULL;
+	total_size = size + params->prefix + params->padding;
+	allocation.len = total_size;
+	allocation.fd_flags = O_RDWR | O_CLOEXEC;
+	if (ioctl(probe_allocator->heap_fd, DMA_HEAP_IOCTL_ALLOC, &allocation) < 0)
+		return NULL;
+	memory = gst_dmabuf_allocator_alloc(allocator, (gint)allocation.fd,
+			total_size);
+	if (!memory) {
+		close((int)allocation.fd);
+		return NULL;
+	}
+	memory->align = params->align;
+	memory->offset = params->prefix;
+	memory->size = size;
+	return memory;
+}
+
+static void probe_dmabuf_allocator_finalize(GObject *object)
+{
+	ProbeDmaBufAllocator *allocator = PROBE_DMABUF_ALLOCATOR(object);
+
+	if (allocator->heap_fd >= 0)
+		close(allocator->heap_fd);
+	G_OBJECT_CLASS(probe_dmabuf_allocator_parent_class)->finalize(object);
+}
+
+static void probe_dmabuf_allocator_class_init(ProbeDmaBufAllocatorClass *klass)
+{
+	GstAllocatorClass *allocator_class = GST_ALLOCATOR_CLASS(klass);
+	GObjectClass *object_class = G_OBJECT_CLASS(klass);
+
+	allocator_class->alloc = probe_dmabuf_alloc;
+	object_class->finalize = probe_dmabuf_allocator_finalize;
+}
+
+static void probe_dmabuf_allocator_init(ProbeDmaBufAllocator *allocator)
+{
+	allocator->heap_path = DMA_HEAP_UNCACHED;
+	allocator->heap_fd = open(DMA_HEAP_UNCACHED, O_RDONLY | O_CLOEXEC);
+	if (allocator->heap_fd < 0) {
+		allocator->heap_path = DMA_HEAP_CACHED;
+		allocator->heap_fd = open(DMA_HEAP_CACHED, O_RDONLY | O_CLOEXEC);
+	}
+	if (allocator->heap_fd < 0)
+		allocator->heap_path = NULL;
+}
+
+static GstAllocator *probe_dmabuf_allocator_new(void)
+{
+	GstAllocator *allocator;
+
+	allocator = g_object_new(PROBE_TYPE_DMABUF_ALLOCATOR, NULL);
+	if (!allocator)
+		return NULL;
+	gst_object_ref_sink(allocator);
+	if (PROBE_DMABUF_ALLOCATOR(allocator)->heap_fd < 0) {
+		fprintf(stderr, "no usable DMA-BUF heap at %s or %s\n",
+			DMA_HEAP_UNCACHED, DMA_HEAP_CACHED);
+		gst_object_unref(allocator);
+		return NULL;
+	}
+	return allocator;
+}
 
 static uint64_t monotonic_ns(void)
 {
@@ -636,6 +740,88 @@ static void release_callback(const RockIvaReleaseFrames *frames, void *userdata)
 	pthread_mutex_unlock(&state->metrics_lock);
 }
 
+static gboolean propose_allocation(GstAppSink *appsink, GstQuery *query,
+					   gpointer user_data)
+{
+	GstCaps *caps = NULL;
+	GstVideoInfo info;
+	GstBufferPool *pool;
+	GstAllocator *allocator;
+	GstStructure *config;
+	GstAllocationParams params = { 0 };
+	gsize size;
+
+	(void)appsink;
+	(void)user_data;
+	if (!query)
+		return FALSE;
+	gst_query_parse_allocation(query, &caps, NULL);
+	if (!caps || !gst_video_info_from_caps(&info, caps))
+		return FALSE;
+
+	/* The driver exposes NV12M as two physical DMA-BUFs, while RockIvaImage has
+	 * one dataFd.  Advertise one downstream DMA-BUF pool and omit VIDEO_META
+	 * from this query so v4l2src copies its multi-plane capture into that pool
+	 * instead of sharing its incompatible producer pool. */
+	pool = gst_video_buffer_pool_new();
+	if (!pool)
+		return FALSE;
+	allocator = probe_dmabuf_allocator_new();
+	if (!allocator) {
+		gst_object_unref(pool);
+		return FALSE;
+	}
+	size = GST_VIDEO_INFO_SIZE(&info);
+	config = gst_buffer_pool_get_config(pool);
+	gst_buffer_pool_config_set_allocator(config, allocator, &params);
+	gst_buffer_pool_config_set_params(config, caps, size, 0, 0);
+	if (!gst_buffer_pool_set_config(pool, config)) {
+		gst_object_unref(allocator);
+		gst_object_unref(pool);
+		return FALSE;
+	}
+	gst_query_add_allocation_pool(query, pool, size, 0, 0);
+	gst_query_add_allocation_param(query, allocator, &params);
+	printf("appsink allocation=single-memory-dmabuf-copy heap=%s size=%zu\n",
+	       PROBE_DMABUF_ALLOCATOR(allocator)->heap_path, size);
+	gst_object_unref(allocator);
+	gst_object_unref(pool);
+	return TRUE;
+}
+
+static void describe_sample_memories(GstBuffer *buffer)
+{
+	GstVideoMeta *meta;
+	guint i;
+
+	if (!buffer)
+		return;
+	printf("sample_memory_layout count=%u buffer_size=%zu\n",
+	       gst_buffer_n_memory(buffer), gst_buffer_get_size(buffer));
+	for (i = 0; i < gst_buffer_n_memory(buffer); i++) {
+		GstMemory *memory = gst_buffer_peek_memory(buffer, i);
+		gsize offset = 0;
+		gsize maxsize = 0;
+		gsize size = memory ? gst_memory_get_sizes(memory, &offset, &maxsize) : 0;
+		int fd = -1;
+
+		if (memory && gst_is_dmabuf_memory(memory))
+			fd = gst_dmabuf_memory_get_fd(memory);
+		printf("  memory index=%u dmabuf=%u fd=%d offset=%zu size=%zu "
+		       "maxsize=%zu allocator=%s\n", i,
+		       memory && gst_is_dmabuf_memory(memory), fd, offset, size, maxsize,
+		       memory && memory->allocator ? GST_OBJECT_NAME(memory->allocator) :
+		       "(none)");
+	}
+	meta = gst_buffer_get_video_meta(buffer);
+	if (meta) {
+		printf("sample_video_meta format=%u planes=%u width=%u height=%u "
+		       "offset0=%zu offset1=%zu stride0=%d stride1=%d\n",
+		       meta->format, meta->n_planes, meta->width, meta->height,
+		       meta->offset[0], meta->offset[1], meta->stride[0], meta->stride[1]);
+	}
+}
+
 static GstElement *create_pipeline(const struct probe_options *options)
 {
 	GstElement *pipeline = NULL;
@@ -643,6 +829,7 @@ static GstElement *create_pipeline(const struct probe_options *options)
 	GstElement *capsfilter = NULL;
 	GstElement *appsink = NULL;
 	GstCaps *caps = NULL;
+	GstAppSinkCallbacks callbacks = { 0 };
 
 	pipeline = gst_pipeline_new("rockiva-dmabuf-probe");
 	source = gst_element_factory_make("v4l2src", "probe-source");
@@ -669,11 +856,21 @@ static GstElement *create_pipeline(const struct probe_options *options)
 				   "height", G_TYPE_INT, (gint)options->height,
 				   "framerate", GST_TYPE_FRACTION, (gint)options->fps, 1,
 				   NULL);
+	if (!caps) {
+		fprintf(stderr, "cannot allocate DMA-BUF caps\n");
+		gst_object_unref(appsink);
+		gst_object_unref(capsfilter);
+		gst_object_unref(source);
+		gst_object_unref(pipeline);
+		return NULL;
+	}
 	g_object_set(capsfilter, "caps", caps, NULL);
 	gst_caps_unref(caps);
 	g_object_set(appsink, "emit-signals", FALSE, "sync", FALSE,
 		     "max-buffers", 4U, "drop", FALSE, "wait-on-eos", FALSE,
 		     "enable-last-sample", FALSE, NULL);
+	callbacks.propose_allocation = propose_allocation;
+	gst_app_sink_set_callbacks(GST_APP_SINK(appsink), &callbacks, NULL, NULL);
 
 	gst_bin_add_many(GST_BIN(pipeline), source, capsfilter, appsink, NULL);
 	if (!gst_element_link_many(source, capsfilter, appsink, NULL)) {
@@ -682,7 +879,8 @@ static GstElement *create_pipeline(const struct probe_options *options)
 		return NULL;
 	}
 	printf("pipeline=v4l2src device=%s io-mode=dmabuf ! "
-	       "video/x-raw,format=NV12,width=%u,height=%u,framerate=%u/1 ! appsink\n",
+	       "video/x-raw,format=NV12,width=%u,height=%u,"
+	       "framerate=%u/1 ! appsink\n",
 	       options->device, options->width, options->height, options->fps);
 	return pipeline;
 }
@@ -796,11 +994,15 @@ static int inspect_sample(GstSample *sample, const struct probe_options *options
 	if (GST_VIDEO_INFO_INTERLACE_MODE(&video_info) !=
 	    GST_VIDEO_INTERLACE_MODE_PROGRESSIVE)
 		goto interlace_invalid;
-	if (gst_buffer_n_memory(buffer) != 1)
+	if (gst_buffer_n_memory(buffer) != 1) {
+		describe_sample_memories(buffer);
 		goto memory_count_invalid;
+	}
 	memory = gst_buffer_peek_memory(buffer, 0);
-	if (!memory || !gst_is_dmabuf_memory(memory))
+	if (!memory || !gst_is_dmabuf_memory(memory)) {
+		describe_sample_memories(buffer);
 		goto dmabuf_invalid;
+	}
 	memset(layout, 0, sizeof(*layout));
 	layout->width = GST_VIDEO_INFO_WIDTH(&video_info);
 	layout->height = GST_VIDEO_INFO_HEIGHT(&video_info);
@@ -1042,8 +1244,10 @@ int main(int argc, char **argv)
 
 	gst_init(NULL, NULL);
 	pipeline = create_pipeline(&options);
-	if (!pipeline)
+	if (!pipeline) {
+		operation_failed = 1;
 		goto done;
+	}
 	appsink = GST_APP_SINK(gst_bin_get_by_name(GST_BIN(pipeline), "probe-sink"));
 	bus = gst_element_get_bus(pipeline);
 	if (!appsink || !bus) {

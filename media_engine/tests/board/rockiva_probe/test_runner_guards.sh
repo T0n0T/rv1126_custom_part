@@ -245,5 +245,17 @@ expect_contains v4l2-rockiva-mp4-push-frame \
 	'ROCKIVA_PushFrame(handle, &image' "$SCRIPT_DIR/v4l2_rockiva_probe.c"
 expect_contains v4l2-rockiva-mp4-cpu-buffer \
 	'fd_lifecycle=cpu-buffer' "$SCRIPT_DIR/v4l2_rockiva_probe.c"
+expect_contains rockiva-dmabuf-io-mode \
+	'GST_V4L2_IO_MODE_DMABUF' "$SCRIPT_DIR/rockiva_dmabuf_probe.c"
+expect_contains rockiva-dmabuf-memory-check \
+	'gst_is_dmabuf_memory' "$SCRIPT_DIR/rockiva_dmabuf_probe.c"
+expect_contains rockiva-dmabuf-allocation-callback \
+	'callbacks.propose_allocation = propose_allocation' "$SCRIPT_DIR/rockiva_dmabuf_probe.c"
+expect_contains rockiva-dmabuf-allocation-pool \
+	'gst_query_add_allocation_pool' "$SCRIPT_DIR/rockiva_dmabuf_probe.c"
+expect_contains rockiva-dmabuf-allocation-param \
+	'gst_query_add_allocation_param' "$SCRIPT_DIR/rockiva_dmabuf_probe.c"
+expect_contains rockiva-dmabuf-heap-allocation \
+	'DMA_HEAP_IOCTL_ALLOC' "$SCRIPT_DIR/rockiva_dmabuf_probe.c"
 
 printf '%s\n' '[PASS] runner guard checks complete without opening a V4L2 device'

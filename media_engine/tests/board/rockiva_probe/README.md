@@ -43,7 +43,12 @@ descriptor's character-device identity with `/dev/video24`. If the opened
 identity cannot be verified, the probe fails closed. The GStreamer DMA-BUF
 probe keeps its pre-open path guard because `v4l2src` owns the capture open;
 it remains an independent experiment and must be run only on the unused
-selfpath.
+selfpath. Its appsink allocation callback requests a single-memory downstream
+DMA-BUF pool backed by `/dev/dma_heap/system-uncached` (falling back to
+`/dev/dma_heap/system`) so `v4l2src` can copy a multi-plane capture into the
+single `dataFd` layout accepted by RockIVA. This is a test-only copy path; it
+does not change the production allocator or prove that the production
+`media_engine` branch can use the same layout.
 
 The file-input runner sets `MIN_PERSON=1` and `MIN_TRACKING=1` by default. The
 native V4L2 runner deliberately defaults both thresholds to zero so that an

@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送任务分解
 
-状态：T0/T2/T4 已完成；T1 已取得 CPU-NV12、隔离采集 DMA-BUF 生命周期、一轮 60 帧有人场景及一轮 CLS8 900 帧对比子证据，但 CLS8 对比出现 `sequence_errors=53` 和明显 ID 重建，且因设备资源达到本轮上限而暂停；T3 仍阻塞于 T1
+状态：T0/T2/T4 已完成；T1 已取得 CPU-NV12、隔离采集 DMA-BUF 生命周期、一轮 60 帧有人场景、一轮 CLS8 900 帧对比及 GStreamer 单内存 DMA-BUF 生命周期子证据，但 CLS8 对比出现 `sequence_errors=53` 和明显 ID 重建，且因设备资源达到本轮上限而暂停；T3 仍阻塞于 T1
 上游规格：`docs/people-flow-alarm/spec.md`
 上游计划：`docs/people-flow-alarm/plan.md`
 本文件作用：记录经确认的 T0-T12 纵向任务、阻塞关系和验收边界
@@ -113,12 +113,15 @@ CLS8 本轮观察到的吞吐连续性和跟踪稳定性较低，PFP 仍为暂�
 `/dev/video25`，不得触碰 `/dev/video24`。
 
 2026-08-27 的网络不可达记录保留在 `docs/people-flow-alarm/t1-board-blocker.md`；
-2026-08-28 已通过 ADB 在同一板卡完成 CPU-NV12 PFP/CLS8 探针。结果、库/模型指纹、
+2026-08-28 已通过 ADB 在同一板卡完成 CPU-NV12 PFP/CLS8 探针。2026-09-04
+又完成 GStreamer V4L2 单内存 DMA-BUF 下游分配器的 30 帧空场景生命周期复测。
+结果、库/模型指纹、
 `ROCKIVA_WaitFinish` 不支持的受限 fallback，以及未完成边界见
 `docs/people-flow-alarm/t1-board-result.md`。这些证据不解除 T3：有人场景下的
 DMA-BUF 已有一轮 60 帧检出/tracking 候选证据；短时隔离停止/重启已有证据，但完整流 epoch、异步回调、
-UAF/泄漏、主路径 sequence 和编码连续性仍未验证。另一次 GStreamer DMA-BUF runner
-在第一个 sample 因内存不是 DMA-BUF 被拒绝，不能与原生 `VIDIOC_EXPBUF` 结果混同。
+UAF/泄漏、主路径 sequence 和编码连续性仍未验证。GStreamer runner 当前已能产出
+单个 DMA-BUF memory 并完成空场景 callback/release 闭环，但这不能替代有人场景、
+多轮稳定性或生产分支验收，也不能与原生 `VIDIOC_EXPBUF` 结果混同。
 
 - [ ] 在候选分辨率和采样率下取得稳定 DMA-BUF person 检出及 `objId/state` 生命周期；
       2026-09-01 原生 V4L2 60 帧 PFP 运行已有 `person=58 tracking=50` 的候选证据，

@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送——实施计划
 
-状态：实施中（T1 探针已提供；CPU-NV12、隔离 DMA-BUF 子门禁及一轮 60 帧有人场景候选证据已有，但因设备资源达到本轮上限暂时暂停更高占用板端复测；T2 已完成）
+状态：实施中（T1 探针已提供；CPU-NV12、隔离原生 DMA-BUF、一轮 60 帧有人场景及 GStreamer 单内存 DMA-BUF 子门禁证据已有，但因设备资源达到本轮上限暂时暂停更高占用板端复测；T2 已完成）
 上游规格：`docs/people-flow-alarm/spec.md`
 下游产物：`task.md`、`checklist.md`（另行创建）
 本阶段约束：仅在已解除依赖的 T2/T4 主机确定性边界内修改代码；T1 真板结果仍是
@@ -87,6 +87,12 @@ GB28181 格式化均由业务层负责。
 DMA-BUF 生命周期验证；生产 GStreamer 分支、多人/多轮有人场景下的 DMA-BUF
 检出/tracking、物理地址输入和参数固化仍待真板证据。CPU-NV12 和单轮 DMA-BUF
 有人片段证据不替代这些门禁。
+
+2026-09-04 又在同一隔离节点完成 GStreamer `v4l2src ! appsink` 的单内存
+DMA-BUF 拷贝试验：探针专用 dma-heap 分配器产出单个带 fd 的 `640x360` sample，
+30 帧空场景均完成 RockIVA push、DET callback、release callback 和 SDK 收尾。
+这解决了测试 runner 的输入内存类型阻塞，但没有证明有人场景、多轮完整流 epoch、
+主编码并发或生产分支可用；`person/tracking=0` 也不构成检测证据。
 
 2026-08-27 的连接阻塞及 2026-08-31 设备资源上限暂停记录保留在
 `docs/people-flow-alarm/t1-board-blocker.md`。CPU-NV12 已取得有人场景检测/跟踪

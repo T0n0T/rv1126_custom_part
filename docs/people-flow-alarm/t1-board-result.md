@@ -268,6 +268,38 @@ SOURCE=mp4 INPUT=/tmp/me/test1.mp4 MODEL_PATH=/oem/usr/lib \
 此模式不是生产 DMA-BUF 输入，也不解除 T1 的多轮 DMA-BUF、完整流 epoch、主编码
 连续性、点播并发和资源预算门禁。
 
+## 2026-09-04 GStreamer V4L2 DMA-BUF 单内存复测
+
+针对前一轮 GStreamer 探针“单个 memory 但不是 DMA-BUF”的结果，探针补充了
+`/dev/dma_heap/system-uncached`（不可用时回退 `/dev/dma_heap/system`）分配器，
+并将该分配器同时放入 allocation query 和下游 buffer pool。这样 `v4l2src` 的
+多平面采集可以复制到一个带 fd 的下游 DMA-BUF，而不是误把普通系统内存当作
+RockIvaImage 的单 `dataFd`。
+
+在 `media_engine` 未运行的状态下，仅使用隔离节点 `/dev/video25`，执行 PFP、
+`640x360`、30 帧、`coreMask=0x0`、`MIN_PERSON=0`、`MIN_TRACKING=0` 的生命周期
+诊断。生产节点 `/dev/video24` 未作为输入；本次没有停止或启动 `media_engine`。
+关键输出为：
+
+```text
+appsink allocation=single-memory-dmabuf-copy heap=/dev/dma_heap/system-uncached size=345600
+negotiated width=640 height=360 hstride=360 y_stride=640 uv_stride=640
+  y_offset=0 uv_offset=230400 logical_planes=2 video_meta=0
+  sample_size=345600 max_size=345600 fd=18
+summary samples_received=30 samples_rejected=0 pushed=30 push_failures=0
+  detection_callbacks=30 detection_errors=0 release_callbacks=30
+  released_frames=30 release_unmatched=0 release_duplicates=0
+  release_mismatches=0 release_invalid=0 channel_mismatches=0
+  detect_latency_ms[min=13.213 max=27.783 avg=16.083]
+  release_latency_ms[min=13.291 max=27.894 avg=16.173]
+```
+
+探针直接退出码为 `0`；`ROCKIVA_WaitFinish=-5` 由有界 callback completion
+fallback 完成，`DETECT_Release=0`、`ROCKIVA_Release=0`。本轮画面没有人员，
+因此 `person=0`、`tracking=0` 只说明 30 帧单 fd DMA-BUF 的采集、拷贝、推理和
+释放闭环成立，不是检测质量或人流验收。复测结束后只恢复了 `/dev/video25` 为
+`3840x2160` 单物理平面 `NV12`；`/dev/video24` 未被重配。
+
 ## 当前判定
 
 - PFP 是下一阶段的暂定候选：CPU-NV12 片段、`test1.mp4` 人群压力样本和一轮 60 帧
@@ -284,15 +316,16 @@ SOURCE=mp4 INPUT=/tmp/me/test1.mp4 MODEL_PATH=/oem/usr/lib \
 - 隔离原生探针连续两次停止/重启后，`media_engine` PID 和 `/dev/video24` FD 数量
   未变化；这只说明本次短时复测未观察到主进程退出或主路径 FD 变化，不能替代编码
   连续性、主路径 sequence 或点播回归。
-- GStreamer DMA-BUF runner 尚未产出可提交给 RockIVA 的 DMA-BUF sample；需要先解决
-  输入内存类型协商，再单独验证该链路。原生 V4L2 60 帧结果不能替代 GStreamer
-  生产输入验证。
+- GStreamer DMA-BUF runner 已能在隔离节点产出单个带 fd 的 DMA-BUF sample，并完成
+  30 帧空场景的 RockIVA callback/release 闭环；这解决了探针自身的输入内存类型
+  阻塞，但仍需有人场景、多轮重复、完整流 epoch 和生产 GStreamer 分支验证。
+  原生 V4L2 有人场景结果和本轮 GStreamer 空场景结果都不能单独解除 T1。
 
 ## 未解除的 T1 门禁
 
 1. 多轮有人场景下的 DMA-BUF 检出、`objId/state` 生命周期和稳定性；PFP 当前只有一轮
-   60 帧候选证据，CLS8 的 900 帧对比又出现 `sequence_errors=53` 和明显 ID 重建，
-   两者都不足以形成 T1 通过证据。
+   原生 V4L2 60 帧候选证据，本轮 GStreamer 30 帧为空场景，CLS8 的 900 帧对比又
+   出现 `sequence_errors=53` 和明显 ID 重建，两者都不足以形成 T1 通过证据。
 2. 当前仅有两次短时隔离停止/重启的 callback 计数证据；流 epoch 切换、停止时的
    异步回调、无泄漏/UAF 和长期重复启停仍未证明。
 3. 与主编码/点播并发时的帧率、丢帧、CPU/NPU、温度和内存预算。

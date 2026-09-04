@@ -38,6 +38,10 @@
       `rgarotate ! kmssink` 分支完成 `30/30/30/30` capture/push/detect/release，
       `person=143`、`tracking=83`；该结果只作为 CPU-NV12 测试源和显示管线候选证据，
       未验证物理屏幕像素，也不替代生产 DMA-BUF 门禁。
+- [x] 2026-09-04 GStreamer V4L2 DMA-BUF 探针使用 dma-heap 下游分配器获得单个
+      `GstDmaBufMemory`（`640x360`、`sample_size=345600`、`logical_planes=2`），
+      完成 30 帧 `samples/pushed/detection/release=30/30/30/30`，所有 ownership
+      和 SDK 收尾错误为 0；本轮为空场景，只证明输入类型和生命周期。
 - [x] DMA-BUF 场景下 person 检出和 `objId/state` 变化已有一轮录制结果；2026-09-01
       原生 V4L2 60 帧运行为 `person=58 tracking=50`，并观察到
       `FIRST/TRACKING/LOST/DISPEAR`。这只是单轮候选证据，真实采集流纪元和长期稳定性
@@ -50,8 +54,9 @@
       `sequence_errors=53`，且 15 个 `obj_id` 伴随明显 `FIRST/LOST/TRACKING/DISAPPEAR`
       重建，T1 仍未通过。
 - [ ] 有人场景下的 DMA-BUF/物理地址输入已验收；隔离 `/dev/video25` 的单物理平面
-      `'NV12'` DMA-BUF、release callback、停止、短时重启和格式恢复已有证据，但
-      GStreamer runner 第一个 sample 不是 DMA-BUF，完整链路、异步停止和 UAF 仍未验证。
+      `'NV12'` DMA-BUF、release callback、停止、短时重启和格式恢复已有证据，GStreamer
+      runner 也已完成单 fd DMA-BUF 的空场景生命周期复测，但有人场景、多轮完整链路、
+      异步停止和 UAF 仍未验证。
 - [ ] 分析启停不影响主编码和点播；目前只有 `/dev/video24` PID/RSS/FD 只读快照，
       没有主路径 sequence 或编码连续性证据。
 
