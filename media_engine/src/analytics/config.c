@@ -69,6 +69,12 @@ int me_analytics_config_validate(const MeAnalyticsConfig *config, char *err,
 					 "analytics backend is missing or overlong");
 		return -1;
 	}
+	if (config->enabled && strcasecmp(config->backend, "rockiva") != 0) {
+		analytics_config_set_err(err, errsz,
+					 "unsupported enabled analytics backend: %s",
+					 config->backend);
+		return -1;
+	}
 	if (config->width < 0 || config->height < 0 || config->fps < 0) {
 		analytics_config_set_err(err, errsz,
 					 "analytics dimensions and fps cannot be negative");

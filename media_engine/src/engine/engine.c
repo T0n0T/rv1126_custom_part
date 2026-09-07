@@ -2,7 +2,14 @@
 
 #include "common/util.h"
 
+#include <glib.h>
+
 #include <string.h>
+
+typedef struct {
+	Engine *engine;
+	MeAnalyticsEvent event;
+} AnalyticsEventDispatch;
 
 static int engine_backend_start(void *data, const SessionParams *p, char *err,
                                 size_t errsz)
@@ -22,7 +29,47 @@ static void engine_gst_event(void *userdata, const char *event,
 	Engine *e = userdata;
 
 	if (e->event_cb)
-		e->event_cb(e->event_userdata, event, session_id, message);
+		 e->event_cb(e->event_userdata, event, session_id, message);
+}
+
+static gboolean deliver_analytics_event(gpointer userdata)
+{
+	AnalyticsEventDispatch *dispatch = userdata;
+	Engine *e = dispatch->engine;
+
+	if (e->analytics_event_cb)
+		e->analytics_event_cb(e->analytics_event_userdata, &dispatch->event);
+	g_free(dispatch);
+	return G_SOURCE_REMOVE;
+}
+
+/* RockIVA invokes the event-engine sink from its worker thread. Copy the
+ * synchronous event and hand delivery to the GLib main context so IPC state
+ * remains owned by the main loop. */
+static void engine_analytics_event(void *userdata, const MeAnalyticsEvent *event)
+{
+	Engine *e = userdata;
+	AnalyticsEventDispatch *dispatch;
+
+	if (!e || !event)
+		return;
+	dispatch = g_new0(AnalyticsEventDispatch, 1);
+	dispatch->engine = e;
+	dispatch->event = *event;
+	g_main_context_invoke(NULL, deliver_analytics_event, dispatch);
+}
+
+static void engine_analytics_observation(
+	void *userdata, const MeNormalizedObservation *observation)
+{
+	Engine *e = userdata;
+	char err[256];
+
+	if (!e || !e->analytics_initialized || !observation)
+		return;
+	if (me_event_engine_process(&e->analytics, observation, err, sizeof(err)) <
+	    0)
+		me_log(ME_LOG_WARN, "analytics observation rejected: %s", err);
 }
 
 int engine_init(Engine *e, const EngineConfig *cfg, char *err, size_t errsz)
@@ -31,6 +78,10 @@ int engine_init(Engine *e, const EngineConfig *cfg, char *err, size_t errsz)
 
 	memset(e, 0, sizeof(*e));
 	e->cfg = *cfg;
+	if (me_event_engine_init(&e->analytics, &cfg->analytics, 1,
+	                         engine_analytics_event, e, err, errsz) != 0)
+		return -1;
+	e->analytics_initialized = true;
 
 	/* AIQ first: the sensor/ISP must be up before the capture pipeline. A
 	 * failure is not fatal to the control plane; start_live reports it. */
@@ -38,9 +89,13 @@ int engine_init(Engine *e, const EngineConfig *cfg, char *err, size_t errsz)
 	                   errsz) != 0)
 		me_log(ME_LOG_ERROR, "aiq start failed (IPC stays usable)");
 
-	e->runner = gst_runner_new(cfg, err, errsz);
+	e->runner = gst_runner_new(cfg, engine_analytics_observation, e, err,
+	                           errsz);
 	if (!e->runner) {
-		me_set_err(err, errsz, "gst_runner allocation failed");
+		if (!err || !err[0])
+			me_set_err(err, errsz, "gst_runner allocation failed");
+		me_event_engine_deinit(&e->analytics);
+		e->analytics_initialized = false;
 		return -1;
 	}
 	gst_runner_set_event_cb(e->runner, engine_gst_event, e);
@@ -53,6 +108,8 @@ int engine_init(Engine *e, const EngineConfig *cfg, char *err, size_t errsz)
 		me_set_err(err, errsz, "session manager allocation failed");
 		gst_runner_free(e->runner);
 		e->runner = NULL;
+		me_event_engine_deinit(&e->analytics);
+		e->analytics_initialized = false;
 		return -1;
 	}
 	return 0;
@@ -60,10 +117,20 @@ int engine_init(Engine *e, const EngineConfig *cfg, char *err, size_t errsz)
 
 void engine_deinit(Engine *e)
 {
+	char err[128];
+
 	if (!e)
 		return;
 	session_mgr_free(e->sessions);
 	gst_runner_free(e->runner);
+	if (e->analytics_initialized) {
+		/* Close the last lifecycle before clearing the engine. The main loop
+		 * drains the queued delivery in main() while the IPC server is alive. */
+		(void)me_event_engine_close(&e->analytics,
+						   ME_EVENT_REASON_PROCESS_RESTART, err, sizeof(err));
+		me_event_engine_deinit(&e->analytics);
+		e->analytics_initialized = false;
+	}
 	aiq_ctrl_stop(&e->aiq);
 }
 
@@ -71,6 +138,13 @@ void engine_set_event_sink(Engine *e, EngineEventCb cb, void *userdata)
 {
 	e->event_cb = cb;
 	e->event_userdata = userdata;
+}
+
+void engine_set_analytics_event_sink(Engine *e, EngineAnalyticsEventCb cb,
+								 void *userdata)
+{
+	e->analytics_event_cb = cb;
+	e->analytics_event_userdata = userdata;
 }
 
 int engine_start_live(Engine *e, const SessionParams *p, char *err,

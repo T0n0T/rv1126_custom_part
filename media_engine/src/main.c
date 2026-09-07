@@ -22,6 +22,13 @@ static void ipc_event_sink(void *userdata, const char *event,
 	ipc_server_broadcast_event(server, event, session_id, message);
 }
 
+static void ipc_analytics_event_sink(void *userdata,
+								 const MeAnalyticsEvent *event)
+{
+	IpcServer *server = userdata;
+	ipc_server_broadcast_analytics_event(server, event);
+}
+
 static void setup_gst_environment(void)
 {
 	if (!getenv("GST_PLUGIN_PATH"))
@@ -66,6 +73,7 @@ int main(int argc, char **argv)
 		return EXIT_FAILURE;
 	}
 	engine_set_event_sink(&engine, ipc_event_sink, &server);
+	engine_set_analytics_event_sink(&engine, ipc_analytics_event_sink, &server);
 
 	loop = g_main_loop_new(NULL, FALSE);
 	g_unix_signal_add(SIGINT, on_signal, loop);
@@ -74,8 +82,11 @@ int main(int argc, char **argv)
 
 	g_main_loop_run(loop);
 
-	ipc_server_deinit(&server);
 	engine_deinit(&engine);
+	while (g_main_context_pending(NULL))
+		g_main_context_iteration(NULL, FALSE);
+	engine_set_analytics_event_sink(&engine, NULL, NULL);
+	ipc_server_deinit(&server);
 	g_main_loop_unref(loop);
 	me_log(ME_LOG_INFO, "media_engine exited");
 	return EXIT_SUCCESS;

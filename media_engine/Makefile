@@ -40,13 +40,16 @@ RK_APP_LDFLAGS = -L$(RK_APP_MEDIA_LIBS_PATH) \
 				 -Wl,-rpath,/oem/usr/lib \
 				 -Wl,-rpath-link,$(RK_APP_MEDIA_LIBS_PATH):$(GST_STAGE)/lib:$(RK_APP_PATH_LIB_INCLUDE)/root/usr/lib \
 				 -pthread -lgstreamer-1.0 -lgstbase-1.0 -lgstvideo-1.0 \
+				 -lgstapp-1.0 \
 				 -lgstallocators-1.0 -lgobject-2.0 -lglib-2.0 -lrga \
-				 -lrockit -lrkaiq -lm
+				 -lrockit -lrkaiq -lrockiva -lm
 
 SRCS := src/main.c \
 	src/common/util.c \
 	src/analytics/observation.c \
 	src/analytics/config.c \
+	src/analytics/event_engine.c \
+	src/analytics/rockiva_runner.c \
 	src/config/config.c \
 		src/engine/engine.c \
 		src/ipc/ipc_server.c \

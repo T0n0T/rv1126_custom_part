@@ -8,6 +8,11 @@
 #include <rga/RgaApi.h>
 #include <rga/drmrga.h>
 
+#include <fcntl.h>
+#include <linux/dma-heap.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
 #include <string.h>
 
 /* Hardware NV12 rotation via librga (RGA2 on RV1126B, /dev/rga). The old C
@@ -18,6 +23,8 @@
  * touches CPU memory. System memory is still supported as a fallback. */
 
 #define ME_RGA_DEFAULT_ROTATION 0
+#define ME_RGA_DMA_HEAP_UNCACHED "/dev/dma_heap/system-uncached"
+#define ME_RGA_DMA_HEAP_SYSTEM "/dev/dma_heap/system"
 
 enum {
 	PROP_ROTATION = 1,
@@ -39,6 +46,89 @@ struct _MeRgaRotate {
 struct _MeRgaRotateClass {
 	GstBaseTransformClass parent_class;
 };
+
+/* GstDmaBufAllocator wraps an existing fd but does not allocate one. RGA's
+ * output pool needs a real exporter, so use the board's dma-heap allocator to
+ * obtain each output fd and return it as normal GstDmaBufMemory. */
+typedef struct {
+	GstAllocator parent;
+} MeDmaHeapAllocator;
+
+typedef struct {
+	GstAllocatorClass parent_class;
+} MeDmaHeapAllocatorClass;
+
+#define ME_TYPE_DMA_HEAP_ALLOCATOR (me_dma_heap_allocator_get_type())
+GType me_dma_heap_allocator_get_type(void);
+G_DEFINE_TYPE(MeDmaHeapAllocator, me_dma_heap_allocator, GST_TYPE_ALLOCATOR)
+
+static const char *me_rga_dma_heap_path(void)
+{
+	if (access(ME_RGA_DMA_HEAP_UNCACHED, R_OK | W_OK) == 0)
+		return ME_RGA_DMA_HEAP_UNCACHED;
+	if (access(ME_RGA_DMA_HEAP_SYSTEM, R_OK | W_OK) == 0)
+		return ME_RGA_DMA_HEAP_SYSTEM;
+	return NULL;
+}
+
+static GstMemory *me_dma_heap_alloc(GstAllocator *allocator, gsize size,
+							 GstAllocationParams *params)
+{
+	const char *heap_path = me_rga_dma_heap_path();
+	struct dma_heap_allocation_data data;
+	GstAllocator *dmabuf_allocator;
+	GstMemory *memory;
+	int heap_fd;
+
+	(void)allocator;
+	(void)params;
+	if (!heap_path || size == 0)
+		return NULL;
+	heap_fd = open(heap_path, O_RDWR | O_CLOEXEC);
+	if (heap_fd < 0)
+		return NULL;
+	memset(&data, 0, sizeof(data));
+	data.len = size;
+	data.fd_flags = O_RDWR | O_CLOEXEC;
+	if (ioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &data) < 0) {
+		close(heap_fd);
+		return NULL;
+	}
+	close(heap_fd);
+
+	dmabuf_allocator = gst_dmabuf_allocator_new();
+	if (!dmabuf_allocator) {
+		close((int)data.fd);
+		return NULL;
+	}
+	memory = gst_dmabuf_allocator_alloc(dmabuf_allocator, (gint)data.fd, size);
+	gst_object_unref(dmabuf_allocator);
+	if (!memory)
+		close((int)data.fd);
+	return memory;
+}
+
+static void me_dma_heap_allocator_class_init(MeDmaHeapAllocatorClass *klass)
+{
+	GstAllocatorClass *allocator_class = GST_ALLOCATOR_CLASS(klass);
+
+	allocator_class->alloc = me_dma_heap_alloc;
+}
+
+static void me_dma_heap_allocator_init(MeDmaHeapAllocator *allocator)
+{
+	allocator->parent.mem_type = "media-engine-dma-heap";
+	GST_OBJECT_FLAG_SET(allocator,
+	                    GST_ALLOCATOR_FLAG_CUSTOM_ALLOC |
+                    GST_ALLOCATOR_FLAG_NO_COPY);
+}
+
+static GstAllocator *me_dma_heap_allocator_new(void)
+{
+	if (!me_rga_dma_heap_path())
+		return NULL;
+	return GST_ALLOCATOR(g_object_new(ME_TYPE_DMA_HEAP_ALLOCATOR, NULL));
+}
 
 G_DEFINE_TYPE(MeRgaRotate, me_rga_rotate, GST_TYPE_BASE_TRANSFORM)
 
@@ -266,13 +356,15 @@ static gboolean me_rga_rotate_propose_allocation(GstBaseTransform *trans,
 		/* Prefer dmabuf so kmssink gets a zero-copy framebuffer; fall back
 		 * to whatever the downstream/upstream chain suggested. */
 		if (gst_query_get_n_allocation_params(query) > 0) {
-			GstAllocator *suggested = NULL;
+			GstAllocator *parsed_allocator = NULL;
 
-			gst_query_parse_nth_allocation_param(query, 0, &suggested,
+			gst_query_parse_nth_allocation_param(query, 0, &parsed_allocator,
 			                                     &params);
-			if (suggested)
-				allocator = GST_ALLOCATOR(gst_object_ref(suggested));
+			if (parsed_allocator)
+				allocator = GST_ALLOCATOR(gst_object_ref(parsed_allocator));
 		}
+		if (allocator == NULL)
+			allocator = me_dma_heap_allocator_new();
 		if (allocator == NULL)
 			allocator = gst_allocator_find("dmabuf");
 		if (allocator == NULL)
@@ -318,10 +410,14 @@ static gboolean me_rga_rotate_decide_allocation(GstBaseTransform *trans,
 	GstBufferPool *pool = NULL;
 	GstStructure *config;
 	GstCaps *outcaps = NULL;
+	GstAllocator *allocator = NULL;
 	guint size = 0, min = 0, max = 0;
 	GstVideoAlignment align;
+	GstAllocationParams params = { 0 };
+	guint pool_count;
 
-	if (gst_query_get_n_allocation_pools(query) > 0)
+	pool_count = gst_query_get_n_allocation_pools(query);
+	if (pool_count > 0)
 		gst_query_parse_nth_allocation_pool(query, 0, &pool, &size, &min,
 		                                    &max);
 	if (pool == NULL)
@@ -331,8 +427,24 @@ static gboolean me_rga_rotate_decide_allocation(GstBaseTransform *trans,
 
 	config = gst_buffer_pool_get_config(pool);
 	gst_query_parse_allocation(query, &outcaps, NULL);
-	if (outcaps)
+	if (outcaps) {
+		GstVideoInfo info;
+
+		if (gst_video_info_from_caps(&info, outcaps))
+			size = GST_VIDEO_INFO_SIZE(&info);
 		gst_buffer_pool_config_set_params(config, outcaps, size, min, max);
+	}
+	if (gst_buffer_pool_config_get_allocator(config, &allocator, &params)) {
+		if (allocator)
+			gst_object_unref(allocator);
+		allocator = NULL;
+	}
+	if (!allocator)
+		allocator = me_dma_heap_allocator_new();
+	if (allocator) {
+		params.align = 15;
+		gst_buffer_pool_config_set_allocator(config, allocator, &params);
+	}
 	gst_buffer_pool_config_add_option(config,
 	                                  GST_BUFFER_POOL_OPTION_VIDEO_META);
 	gst_buffer_pool_config_add_option(
@@ -341,13 +453,23 @@ static gboolean me_rga_rotate_decide_allocation(GstBaseTransform *trans,
 	align.stride_align[0] = 15;
 	align.stride_align[1] = 15;
 	gst_buffer_pool_config_set_video_alignment(config, &align);
-	if (!gst_buffer_pool_set_config(pool, config))
-		GST_WARNING_OBJECT(trans, "could not update downstream pool config");
-	gst_query_set_nth_allocation_pool(query, 0, pool, size, min, max);
+	if (!gst_buffer_pool_set_config(pool, config)) {
+		GST_ERROR_OBJECT(trans, "could not update downstream pool config");
+		if (allocator)
+			gst_object_unref(allocator);
+		gst_object_unref(pool);
+		return FALSE;
+	}
+	if (pool_count > 0)
+		gst_query_set_nth_allocation_pool(query, 0, pool, size, min, max);
+	else
+		gst_query_add_allocation_pool(query, pool, size, min, max);
+	if (allocator)
+		gst_object_unref(allocator);
 	gst_object_unref(pool);
 
-	return GST_BASE_TRANSFORM_CLASS(me_rga_rotate_parent_class)
-	    ->decide_allocation(trans, query);
+	(void)trans;
+	return TRUE;
 }
 
 static int me_rga_rotation_to_rga(gint rotation)

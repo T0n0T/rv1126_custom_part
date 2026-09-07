@@ -1,6 +1,8 @@
 #include "gst/gst_runner.h"
 #include "gst/me_rga_rotate.h"
 
+#include "analytics/rockiva_runner.h"
+
 #include "common/me_errors.h"
 #include "common/util.h"
 
@@ -25,6 +27,9 @@ struct GstRunner {
 	EngineConfig cfg;
 	GstElement *pipeline;
 	GstElement *tee;
+	MeRockivaRunner *analytics;
+	char analytics_channel_id[ME_ANALYTICS_CHANNEL_ID_MAX];
+	uint64_t analytics_stream_epoch;
 	guint bus_watch;
 	bool base_ready;
 	char base_error[256];
@@ -67,12 +72,26 @@ static GstElement *build_base_pipeline(const EngineConfig *cfg, char **err_text)
 		    " ! kmssink sync=false connector-id=%d plane-id=%d "
 		    "skip-vsync=true",
 		    cfg->connector_id, cfg->plane_id);
-	} else {
+	} else if (!cfg->analytics.enabled) {
 		/* Keep at least one linked pad on the tee from startup: a bare
 		 * tee that starts with zero pads can fail to deliver buffers to a
 		 * branch requested later on this SDK build. fakesink just drops
 		 * frames, so the camera keeps streaming with no display cost. */
 		g_string_append(s, " t. ! fakesink sync=false");
+	}
+	if (cfg->analytics.enabled) {
+		g_string_append_printf(
+		    s,
+		    " t. ! queue max-size-buffers=4 leaky=downstream");
+		g_string_append_printf(
+		    s,
+		    " ! rgarotate rotation=0 out-width=%d out-height=%d"
+		    " ! videorate drop-only=true"
+		    " ! video/x-raw,format=NV12,width=%d,height=%d,framerate=%d/1"
+		    " ! appsink name=analytics-sink emit-signals=false sync=false async=false"
+		    " max-buffers=4 drop=true wait-on-eos=false enable-last-sample=false",
+		    cfg->analytics.width, cfg->analytics.height, cfg->analytics.width,
+		    cfg->analytics.height, cfg->analytics.fps);
 	}
 
 	pipe = gst_parse_launch(s->str, &gerr);
@@ -322,6 +341,14 @@ int gst_runner_start_live(GstRunner *r, const SessionParams *p, char *err,
 	}
 
 	r->branch_active = true;
+	if (r->analytics) {
+		if (r->analytics_stream_epoch == UINT64_MAX)
+			r->analytics_stream_epoch = 1;
+		else
+			r->analytics_stream_epoch++;
+		me_rockiva_runner_set_stream(r->analytics, p->channel_id,
+		                             r->analytics_stream_epoch);
+	}
 	me_log(ME_LOG_INFO,
 	       "live branch %s -> %s:%d codec=%s ssrc=%u pt=%d bitrate=%d "
 	       "rotation=%d",
@@ -421,6 +448,14 @@ int gst_runner_stop_live(GstRunner *r, const char *session_id, char *err,
 	}
 
 	live_branch_teardown(r);
+	if (r->analytics) {
+		if (r->analytics_stream_epoch == UINT64_MAX)
+			r->analytics_stream_epoch = 1;
+		else
+			r->analytics_stream_epoch++;
+		me_rockiva_runner_set_stream(r->analytics, r->analytics_channel_id,
+		                             r->analytics_stream_epoch);
+	}
 	me_log(ME_LOG_INFO, "live branch %s stopped, udpsink released",
 	       session_id);
 	return ME_ERR_OK;
@@ -445,7 +480,9 @@ void gst_runner_status(GstRunner *r, bool *running, int *fps, int *bitrate)
 
 /* ---------- lifecycle ---------- */
 
-GstRunner *gst_runner_new(const EngineConfig *cfg, char *err, size_t errsz)
+GstRunner *gst_runner_new(const EngineConfig *cfg,
+						  GstRunnerAnalyticsCb analytics_cb,
+						  void *analytics_userdata, char *err, size_t errsz)
 {
 	GstRunner *r;
 	GstBus *bus = NULL;
@@ -453,9 +490,13 @@ GstRunner *gst_runner_new(const EngineConfig *cfg, char *err, size_t errsz)
 	gint64 deadline;
 	char *parse_err = NULL;
 	bool playing = false;
+	GstElement *analytics_sink = NULL;
 
 	r = g_new0(GstRunner, 1);
 	r->cfg = *cfg;
+	r->analytics_stream_epoch = 1;
+	snprintf(r->analytics_channel_id, sizeof(r->analytics_channel_id),
+	         "camera-%d", cfg->cam_id);
 
 	gst_init(NULL, NULL);
 	me_rga_rotate_register();
@@ -482,6 +523,33 @@ GstRunner *gst_runner_new(const EngineConfig *cfg, char *err, size_t errsz)
 		r->pipeline = NULL;
 		me_set_err(err, errsz, "%s", r->base_error);
 		return r;
+	}
+	if (cfg->analytics.enabled) {
+		analytics_sink = gst_bin_get_by_name(GST_BIN(r->pipeline),
+											 "analytics-sink");
+		if (!analytics_sink) {
+			me_log(ME_LOG_ERROR,
+			       "analytics appsink not found; continuing without analytics");
+			if (err && errsz > 0)
+				err[0] = '\0';
+		}
+		if (analytics_sink) {
+			r->analytics = me_rockiva_runner_new(
+			    GST_APP_SINK(analytics_sink), &cfg->analytics, analytics_cb,
+			    analytics_userdata, err, errsz);
+			gst_object_unref(analytics_sink);
+			analytics_sink = NULL;
+			if (!r->analytics) {
+				me_log(ME_LOG_ERROR,
+				       "RockIVA analytics unavailable; continuing with video only");
+				if (err && errsz > 0)
+					err[0] = '\0';
+			}
+		}
+		if (r->analytics) {
+			me_rockiva_runner_set_stream(r->analytics, r->analytics_channel_id,
+			                             r->analytics_stream_epoch);
+		}
 	}
 
 	bus = gst_element_get_bus(r->pipeline);
@@ -563,6 +631,17 @@ void gst_runner_free(GstRunner *r)
 		}
 		live_branch_destroy_idle(r);
 	}
+	if (r->analytics) {
+		if (me_rockiva_runner_free(r->analytics) != 0) {
+			me_log(ME_LOG_ERROR, "RockIVA analytics runner shutdown incomplete");
+			/* The runner still owns SDK callbacks and any unresolved GstBuffers.
+		 * Keep the whole object graph alive rather than unref'ing the pipeline
+		 * underneath a late release callback. The process is already on its
+		 * shutdown path, so leaking this graph is safer than a use-after-free. */
+			return;
+		}
+		r->analytics = NULL;
+	}
 	if (r->bus_watch) {
 		g_source_remove(r->bus_watch);
 		r->bus_watch = 0;
@@ -571,6 +650,8 @@ void gst_runner_free(GstRunner *r)
 		gst_element_set_state(r->pipeline, GST_STATE_NULL);
 		gst_object_unref(r->pipeline);
 	}
+	if (r->tee)
+		gst_object_unref(r->tee);
 	g_free(r);
 }
 

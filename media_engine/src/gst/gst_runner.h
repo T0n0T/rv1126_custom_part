@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "analytics/observation.h"
 #include "config/config.h"
 #include "session/session.h"
 
@@ -14,11 +15,16 @@ typedef struct GstRunner GstRunner;
 typedef void (*GstRunnerEventCb)(void *userdata, const char *event,
                                  const char *session_id, const char *message);
 
+typedef void (*GstRunnerAnalyticsCb)(
+	void *userdata, const MeNormalizedObservation *observation);
+
 /* Creates the persistent capture pipeline
  * (v4l2src io-mode=dmabuf -> tee -> [kmssink preview]) and starts it.
  * Camera start failure is not fatal to the runner: IPC stays usable and
  * start_live reports the recorded failure. */
-GstRunner *gst_runner_new(const EngineConfig *cfg, char *err, size_t errsz);
+GstRunner *gst_runner_new(const EngineConfig *cfg,
+						 GstRunnerAnalyticsCb analytics_cb,
+						 void *analytics_userdata, char *err, size_t errsz);
 void gst_runner_free(GstRunner *r);
 
 void gst_runner_set_event_cb(GstRunner *r, GstRunnerEventCb cb,

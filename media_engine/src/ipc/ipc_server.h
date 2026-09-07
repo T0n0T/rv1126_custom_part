@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "analytics/event_engine.h"
 #include "engine/engine.h"
 
 typedef struct IpcClient IpcClient;
@@ -26,5 +27,9 @@ void ipc_server_deinit(IpcServer *s);
  * May be dropped when no daemon connection is open; never blocks. */
 void ipc_server_broadcast_event(IpcServer *s, const char *event,
                                 const char *session_id, const char *message);
+
+/* Structured people-flow event notification on the same media.event channel. */
+void ipc_server_broadcast_analytics_event(IpcServer *s,
+                                           const MeAnalyticsEvent *event);
 
 #endif /* ME_IPC_SERVER_H */

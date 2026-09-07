@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 #include "aiq/aiq_ctrl.h"
+#include "analytics/event_engine.h"
 #include "common/me_errors.h"
 #include "config/config.h"
 #include "gst/gst_runner.h"
@@ -19,13 +20,20 @@ typedef struct {
 typedef void (*EngineEventCb)(void *userdata, const char *event,
                               const char *session_id, const char *message);
 
+typedef void (*EngineAnalyticsEventCb)(void *userdata,
+									 const MeAnalyticsEvent *event);
+
 typedef struct {
 	EngineConfig cfg;
 	AiqCtrl aiq;
 	GstRunner *runner;
 	SessionMgr *sessions;
+	MeEventEngine analytics;
+	bool analytics_initialized;
 	EngineEventCb event_cb;
 	void *event_userdata;
+	EngineAnalyticsEventCb analytics_event_cb;
+	void *analytics_event_userdata;
 } Engine;
 
 int engine_init(Engine *e, const EngineConfig *cfg, char *err, size_t errsz);
@@ -33,6 +41,8 @@ void engine_deinit(Engine *e);
 /* Wires media-plane events (error/eos/state) to an external sink, e.g. the
  * IPC server's media.event broadcast. */
 void engine_set_event_sink(Engine *e, EngineEventCb cb, void *userdata);
+void engine_set_analytics_event_sink(Engine *e, EngineAnalyticsEventCb cb,
+								 void *userdata);
 
 int engine_start_live(Engine *e, const SessionParams *p, char *err,
                       size_t errsz);

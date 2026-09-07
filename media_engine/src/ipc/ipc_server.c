@@ -725,3 +725,107 @@ void ipc_server_broadcast_event(IpcServer *s, const char *event,
 	}
 	g_free(line);
 }
+
+void ipc_server_broadcast_analytics_event(IpcServer *s,
+									 const MeAnalyticsEvent *event)
+{
+	cJSON *params = NULL;
+	cJSON *notif = NULL;
+	cJSON *analytics = NULL;
+	cJSON *timebase = NULL;
+	cJSON *track_ids = NULL;
+	char *text;
+	size_t len;
+	gchar *line;
+	GSList *it;
+	uint32_t i;
+
+	if (!s || !event)
+		return;
+	params = cJSON_CreateObject();
+	notif = cJSON_CreateObject();
+	analytics = cJSON_CreateObject();
+	timebase = cJSON_CreateObject();
+	track_ids = cJSON_CreateArray();
+	if (!params || !notif || !analytics || !timebase || !track_ids)
+		goto cleanup;
+
+	cJSON_AddStringToObject(params, "event", "analytics");
+	cJSON_AddNumberToObject(analytics, "contract_version",
+	                        event->contract_version);
+	cJSON_AddStringToObject(analytics, "event_id", event->event_id);
+	cJSON_AddStringToObject(analytics, "channel_id", event->channel_id);
+	cJSON_AddNumberToObject(analytics, "stream_epoch",
+	                        (double)event->stream_epoch);
+	cJSON_AddStringToObject(analytics, "event_type",
+	                        me_rule_type_name(event->event_type));
+	cJSON_AddStringToObject(analytics, "rule_id", event->rule_id);
+	cJSON_AddStringToObject(analytics, "phase",
+	                        me_event_phase_name(event->phase));
+	cJSON_AddNumberToObject(analytics, "event_seq", (double)event->event_seq);
+	cJSON_AddStringToObject(analytics, "reason",
+	                        me_event_reason_name(event->reason));
+	cJSON_AddNumberToObject(analytics, "event_time_us",
+	                        (double)event->event_time_us);
+	cJSON_AddStringToObject(analytics, "clock_state",
+	                        me_clock_state_name(event->clock_state));
+	cJSON_AddBoolToObject(analytics, "source_pts_valid",
+	                      event->source_pts_valid);
+	cJSON_AddNumberToObject(analytics, "source_pts",
+	                        (double)event->source_pts);
+	cJSON_AddNumberToObject(timebase, "num", event->source_timebase.num);
+	cJSON_AddNumberToObject(timebase, "den", event->source_timebase.den);
+	cJSON_AddItemToObject(analytics, "source_timebase", timebase);
+	timebase = NULL;
+	cJSON_AddNumberToObject(analytics, "frame_id", (double)event->frame_id);
+	cJSON_AddNumberToObject(analytics, "person_count", event->person_count);
+	cJSON_AddNumberToObject(analytics, "delta_in", event->delta_in);
+	cJSON_AddNumberToObject(analytics, "delta_out", event->delta_out);
+	cJSON_AddNumberToObject(analytics, "config_version",
+	                        (double)event->config_version);
+	cJSON_AddStringToObject(analytics, "evidence_id", event->evidence_id);
+	cJSON_AddNumberToObject(analytics, "responsible_track_count",
+	                        event->responsible_track_count);
+	for (i = 0; i < event->responsible_track_count &&
+	            i < ME_ANALYTICS_EVENT_MAX_TRACKS; i++)
+		cJSON_AddItemToArray(track_ids,
+		                    cJSON_CreateNumber(
+		                        (double)event->responsible_track_ids[i]));
+	cJSON_AddItemToObject(analytics, "responsible_track_ids", track_ids);
+	track_ids = NULL;
+	cJSON_AddItemToObject(params, "analytics", analytics);
+	analytics = NULL;
+	cJSON_AddNumberToObject(notif, "v", 1);
+	cJSON_AddStringToObject(notif, "method", "media.event");
+	cJSON_AddItemToObject(notif, "params", params);
+	params = NULL;
+
+	text = cJSON_PrintUnformatted(notif);
+	if (!text)
+		goto cleanup;
+	len = strlen(text);
+	line = g_malloc(len + 2);
+	memcpy(line, text, len);
+	line[len] = '\n';
+	line[len + 1] = '\0';
+	cJSON_free(text);
+	for (it = s->clients; it; it = it->next) {
+		IpcClient *client = it->data;
+		if (!ipc_client_send(s, client, line))
+			me_log(ME_LOG_WARN, "ipc: analytics event dropped for fd=%d",
+			       client->fd);
+	}
+	g_free(line);
+
+cleanup:
+	if (track_ids)
+		cJSON_Delete(track_ids);
+	if (timebase)
+		cJSON_Delete(timebase);
+	if (analytics)
+		cJSON_Delete(analytics);
+	if (params)
+		cJSON_Delete(params);
+	if (notif)
+		cJSON_Delete(notif);
+}
