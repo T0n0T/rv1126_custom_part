@@ -24,6 +24,25 @@
     "fps": 30,
     "bitrate": 8192
   },
+  "events": {
+    "enabled": false,
+    "outbox_path": "/data/gb28181_daemon/delivery-outbox.jsonl",
+    "max_records": 4096,
+    "max_bytes": 16777216,
+    "alarm_priority": 4,
+    "alarm_method": 5,
+    "alarm_types": {
+      "line_cross": 5,
+      "intrusion": 6,
+      "occupancy": 9
+    },
+    "send_updates": false,
+    "send_ends": false,
+    "max_attempts": 10,
+    "retry_base_ms": 1000,
+    "retry_max_ms": 300000,
+    "send_timeout_ms": 5000
+  },
   "channels": [
     {
       "id": "35020000001310000001",

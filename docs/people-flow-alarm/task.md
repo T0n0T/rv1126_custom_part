@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送任务分解
 
-状态：T0/T2/T4 已完成；T1 已取得 CPU-NV12、隔离采集 DMA-BUF 生命周期、一轮 60 帧有人场景、一轮 CLS8 900 帧对比及 GStreamer 单内存 DMA-BUF 生命周期子证据，但 CLS8 对比出现 `sequence_errors=53` 和明显 ID 重建，且因设备资源达到本轮上限而暂停；T3 代码已落地但板端验收仍待补齐；T5 第一阶段已实现，证据缓存与 daemon 投递仍未开始
+状态：T0/T2/T4 已完成；T1 已取得 CPU-NV12、隔离采集 DMA-BUF 生命周期、一轮 60 帧有人场景、一轮 CLS8 900 帧对比及 GStreamer 单内存 DMA-BUF 生命周期子证据，但 CLS8 对比出现 `sequence_errors=53` 和明显 ID 重建，且因设备资源达到本轮上限而暂停；T3 代码已落地但板端验收仍待补齐；T5/T6 主机事件桥、daemon outbox 和 Alarm 代码已落地，证据缓存及 WVP/真板验收仍未完成
 上游规格：`docs/people-flow-alarm/spec.md`
 上游计划：`docs/people-flow-alarm/plan.md`
 本文件作用：记录经确认的 T0-T12 纵向任务、阻塞关系和验收边界
@@ -16,8 +16,8 @@
 | T2 | 观察结果与配置契约 | T0 | completed |
 | T3 | 常驻分析分支 | T1、T2 | in progress（代码已落地，板端验收待补） |
 | T4 | 事件引擎 | T2 | completed |
-| T5 | 证据缓存与持久事件桥 | T3、T4 | in progress（第一阶段：事件日志与 IPC 订阅桥） |
-| T6 | daemon Outbox 与标准 Alarm | T5 | blocked |
+| T5 | 证据缓存与持久事件桥 | T3、T4 | in progress（事件日志、IPC 订阅和 daemon 持久接收已实现，证据缓存待补） |
+| T6 | daemon Outbox 与标准 Alarm | T5 | in progress（主机代码与测试已实现，WVP/SIP 运行态验收待补） |
 | T7 | 精确证据 Sink | T5、T6 | blocked |
 | T8 | stock WVP 兼容验证 | T6 | blocked |
 | T9 | 可观测性、故障隔离与打包 | T3、T5、T6 | blocked |
@@ -199,7 +199,7 @@ path remain downstream acceptance items.
 
 **Blocked by:** T3 — 常驻分析分支；T4 — 事件引擎。
 
-**Status:** in progress（事件日志与 IPC 订阅桥已实现；证据缓存和 daemon 仍待开发）
+**Status:** in progress（事件日志、IPC 订阅桥和 daemon 持久接收已实现；证据缓存仍待开发）
 
 - [ ] 触发帧优先选择精确证据，降级到近邻帧时记录差异并标记近似。
 - [ ] 图片发布原子化，证据元数据包含 `event_id`、`evidence_id`、帧 ID、PTS、校验和及保留状态。
@@ -209,8 +209,11 @@ path remain downstream acceptance items.
       cursor；`media.ack_events` 支持客户端确认进度。
 - [x] 队满时优先保护 START/END，UPDATE 可丢弃并统计；主机测试覆盖重启、损坏尾部、
       cursor 重放、缺口和边界保护。
-- [ ] daemon 持久化 ACK、断线恢复、证据缓存和 DeliveryOutbox 仍未实现，因此 T5
-      尚未完成端到端投递验收。
+- [x] daemon 持久化 ACK、断线恢复、幂等接收和 DeliveryOutbox 已实现；事件先写入
+      daemon outbox 再 ACK media_engine，重启从 durable cursor 恢复，Alarm/Evidence
+      sink 状态分离。
+- [ ] 证据缓存仍未实现，因此 T5 尚未完成精确证据和整链路验收；daemon outbox 已具备
+      版本校验、有界容量、原子压缩、损坏尾部截断和中间损坏 fail-stop。
 
 ### T6 — daemon Outbox 与标准 Alarm
 
@@ -218,13 +221,19 @@ path remain downstream acceptance items.
 
 **Blocked by:** T5 — 证据缓存与持久事件桥。
 
-**Status:** blocked
+**Status:** in progress（daemon 订阅、outbox、Alarm 构建和重试代码已实现；WVP/真板验收待补）
 
-- [ ] daemon 重启后可从最后确认游标继续接收，重复事件按幂等键处理。
-- [ ] Outbox 分别记录 Alarm 和证据 sink 状态，成功 sink 不因另一 sink 失败而重发。
-- [ ] 标准 Alarm XML 包含必需字段，`SN`、事件序号、帧 ID 和 PTS 严格分离。
-- [ ] Alarm XML 不嵌入 JPEG、Base64 或端侧本地路径；默认只投递 START。
-- [ ] SIP 超时、拒绝、未注册和重试耗尽均可观测且不影响媒体主链路。
+- [x] daemon 重启后从最后确认游标继续接收，重复事件按 `event_id/phase/event_seq`
+      幂等处理；主机测试覆盖 ACK、重启恢复和重复事件。
+- [x] Outbox 分别记录 Alarm 和证据 sink 状态，成功 sink 不因另一 sink 失败而重发；
+      证据 sink 当前保持 disabled，待 T7 实现。
+- [x] 标准 Alarm XML 包含必需字段，`SN`、事件序号、帧 ID 和 PTS 严格分离；Alarm
+      序号独立分配并在 outbox 记录中保持重试稳定。
+- [x] Alarm XML 不嵌入 JPEG、Base64 或端侧本地路径；默认只投递 START。
+- [x] SIP 超时、拒绝、未注册和重试耗尽进入日志和 outbox 状态，失败不阻塞媒体主链路；
+      真实 SIP/WVP 接收仍待运行态验证。
+- [x] outbox 记录包含设备/通道/`event_id`/phase/`event_seq` 幂等键；压力下明确丢弃
+      `UPDATE` 并确认游标，`START/END` 无可安全持久空间时 fail-stop。
 
 ### T7 — 精确证据 Sink
 

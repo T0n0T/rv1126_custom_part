@@ -15,6 +15,7 @@ type Config struct {
 	SIP      SIPConfig    `json:"sip"`
 	Media    MediaConfig  `json:"media"`
 	Stream   StreamConfig `json:"stream"`
+	Events   EventsConfig `json:"events"`
 	Channels []Channel    `json:"channels"`
 	Log      LogConfig    `json:"log"`
 }
@@ -45,6 +46,22 @@ type StreamConfig struct {
 	Height      int    `json:"height"`
 	FPS         int    `json:"fps"`
 	Bitrate     int    `json:"bitrate"`
+}
+
+type EventsConfig struct {
+	Enabled       bool           `json:"enabled"`
+	OutboxPath    string         `json:"outbox_path"`
+	MaxRecords    int            `json:"max_records"`
+	MaxBytes      int64          `json:"max_bytes"`
+	AlarmPriority int            `json:"alarm_priority"`
+	AlarmMethod   int            `json:"alarm_method"`
+	AlarmTypes    map[string]int `json:"alarm_types"`
+	SendUpdates   bool           `json:"send_updates"`
+	SendEnds      bool           `json:"send_ends"`
+	MaxAttempts   int            `json:"max_attempts"`
+	RetryBaseMS   int            `json:"retry_base_ms"`
+	RetryMaxMS    int            `json:"retry_max_ms"`
+	SendTimeoutMS int            `json:"send_timeout_ms"`
 }
 
 type Channel struct {
@@ -93,6 +110,22 @@ func defaults() *Config {
 			Height:      2160,
 			FPS:         30,
 			Bitrate:     8192,
+		},
+		Events: EventsConfig{
+			OutboxPath:    "/data/gb28181_daemon/delivery-outbox.jsonl",
+			MaxRecords:    4096,
+			MaxBytes:      16 << 20,
+			AlarmPriority: 4,
+			AlarmMethod:   5,
+			AlarmTypes: map[string]int{
+				"line_cross": 5,
+				"intrusion":  6,
+				"occupancy":  9,
+			},
+			MaxAttempts:   10,
+			RetryBaseMS:   1000,
+			RetryMaxMS:    300000,
+			SendTimeoutMS: 5000,
 		},
 		Log: LogConfig{Level: "info"},
 	}
@@ -145,6 +178,35 @@ func (c *Config) validate() error {
 	case "none", "rpc":
 	default:
 		return fmt.Errorf("media.mode must be \"none\" or \"rpc\", got %q", c.Media.Mode)
+	}
+	if c.Events.Enabled {
+		if c.Media.Mode != "rpc" {
+			return errors.New("events require media.mode=rpc")
+		}
+		if c.Events.OutboxPath == "" {
+			return errors.New("events.outbox_path is required when events are enabled")
+		}
+		if c.Events.MaxRecords <= 0 || c.Events.MaxBytes <= 0 {
+			return errors.New("events outbox limits must be positive")
+		}
+		if c.Events.AlarmPriority < 1 || c.Events.AlarmPriority > 4 {
+			return errors.New("events.alarm_priority must be between 1 and 4")
+		}
+		if c.Events.AlarmMethod <= 0 {
+			return errors.New("events.alarm_method must be positive")
+		}
+		if c.Events.MaxAttempts <= 0 {
+			return errors.New("events.max_attempts must be positive")
+		}
+		if c.Events.RetryBaseMS <= 0 || c.Events.RetryMaxMS < c.Events.RetryBaseMS ||
+			c.Events.SendTimeoutMS <= 0 {
+			return errors.New("events retry max and send timeouts are invalid")
+		}
+		for eventType, alarmType := range c.Events.AlarmTypes {
+			if eventType == "" || alarmType <= 0 || alarmType > 255 {
+				return fmt.Errorf("events.alarm_types[%q] must be between 1 and 255", eventType)
+			}
+		}
 	}
 	for _, ch := range c.Channels {
 		if len(ch.ID) != 20 {

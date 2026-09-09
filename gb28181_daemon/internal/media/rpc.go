@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sync/atomic"
@@ -101,6 +102,128 @@ func (r *RPC) Status(ctx context.Context) (Status, error) {
 	return Status{Running: out.Running, FPS: out.FPS, Bitrate: out.Bitrate}, nil
 }
 
+// ConsumeEvents keeps one Unix-socket connection open until the producer or
+// context closes it. Each event is acknowledged only after onEvent returns,
+// so callers can persist the record before allowing the producer cursor to
+// advance.
+func (r *RPC) ConsumeEvents(ctx context.Context, afterCursor uint64,
+	onInfo func(EventSubscribeInfo) error,
+	onEvent func(EventNotification) error) error {
+	if onEvent == nil {
+		return fmt.Errorf("event callback is required")
+	}
+
+	timeout := r.timeout
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	dialer := net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "unix", r.endpoint)
+	if err != nil {
+		return fmt.Errorf("dial media event stream: %w", err)
+	}
+	defer conn.Close()
+
+	readDone := make(chan struct{})
+	defer close(readDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-readDone:
+		}
+	}()
+
+	subscribeID := r.nextID.Add(1)
+	if err := writeRPCRequest(conn, rpcRequest{
+		V:      1,
+		ID:     subscribeID,
+		Method: "media.subscribe_events",
+		Params: mustJSON(eventSubscribeParams{AfterCursor: afterCursor}),
+	}); err != nil {
+		return fmt.Errorf("subscribe media events: %w", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	subscribed := false
+	pendingAcks := make(map[uint64]uint64)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if err == io.EOF {
+				return fmt.Errorf("media event stream closed")
+			}
+			return fmt.Errorf("read media event stream: %w", err)
+		}
+
+		var message rpcEnvelope
+		if err := json.Unmarshal(line, &message); err != nil {
+			return fmt.Errorf("decode media event message: %w", err)
+		}
+		if message.Error != nil {
+			return &ProtocolError{Code: message.Error.Code, Message: message.Error.Message}
+		}
+
+		if message.Method == "media.event" {
+			if !subscribed {
+				return fmt.Errorf("media event arrived before subscribe response")
+			}
+			var params eventNotificationParams
+			if err := json.Unmarshal(message.Params, &params); err != nil {
+				return fmt.Errorf("decode media event notification: %w", err)
+			}
+			if params.Event != "analytics" || params.Cursor == 0 {
+				return fmt.Errorf("invalid media analytics notification")
+			}
+			if err := onEvent(EventNotification{
+				Cursor: params.Cursor,
+				Event:  params.Analytics,
+			}); err != nil {
+				return err
+			}
+			ackID := r.nextID.Add(1)
+			if err := writeRPCRequest(conn, rpcRequest{
+				V:      1,
+				ID:     ackID,
+				Method: "media.ack_events",
+				Params: mustJSON(eventAckParams{Cursor: params.Cursor}),
+			}); err != nil {
+				return fmt.Errorf("ack media event cursor %d: %w", params.Cursor, err)
+			}
+			pendingAcks[ackID] = params.Cursor
+			continue
+		}
+
+		if message.ID == subscribeID {
+			var result eventSubscribeResult
+			if err := json.Unmarshal(message.Result, &result); err != nil {
+				return fmt.Errorf("decode media subscribe result: %w", err)
+			}
+			if !result.Subscribed {
+				return fmt.Errorf("media event subscription was not accepted")
+			}
+			subscribed = true
+			if onInfo != nil {
+				if err := onInfo(EventSubscribeInfo{
+					ReplayGap:    result.ReplayGap,
+					OldestCursor: result.OldestCursor,
+					LatestCursor: result.LatestCursor,
+				}); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+
+		if _, ok := pendingAcks[message.ID]; ok {
+			delete(pendingAcks, message.ID)
+		}
+	}
+}
+
 func (r *RPC) call(ctx context.Context, method string, params any, out any) error {
 	paramsRaw, err := json.Marshal(params)
 	if err != nil {
@@ -141,6 +264,33 @@ func (r *RPC) call(ctx context.Context, method string, params any, out any) erro
 		if err := json.Unmarshal(resp.Result, out); err != nil {
 			return fmt.Errorf("decode %s result: %w", method, err)
 		}
+	}
+	return nil
+}
+
+func mustJSON(value any) json.RawMessage {
+	data, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return data
+}
+
+func writeRPCRequest(conn net.Conn, request rpcRequest) error {
+	data, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	for len(data) > 0 {
+		n, err := conn.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrUnexpectedEOF
+		}
+		data = data[n:]
 	}
 	return nil
 }

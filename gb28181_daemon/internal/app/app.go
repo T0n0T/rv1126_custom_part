@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"xiaoyu/gb28181-daemon/internal/config"
+	"xiaoyu/gb28181-daemon/internal/delivery"
 	"xiaoyu/gb28181-daemon/internal/gbxml"
 	"xiaoyu/gb28181-daemon/internal/media"
 	"xiaoyu/gb28181-daemon/internal/session"
@@ -106,6 +107,35 @@ func Run(ctx context.Context, cfg *config.Config) error {
 
 	if err := registerWithRetry(ctx, ua, log); err != nil {
 		return err
+	}
+	if cfg.Events.Enabled {
+		subscriber, ok := ctrl.(media.EventSubscriber)
+		if !ok {
+			return fmt.Errorf("events enabled but media controller has no event subscriber")
+		}
+		events, err := delivery.New(delivery.Config{
+			DeviceID:      cfg.SIP.DeviceID,
+			OutboxPath:    cfg.Events.OutboxPath,
+			MaxRecords:    cfg.Events.MaxRecords,
+			MaxBytes:      cfg.Events.MaxBytes,
+			AlarmPriority: cfg.Events.AlarmPriority,
+			AlarmMethod:   cfg.Events.AlarmMethod,
+			AlarmTypes:    cfg.Events.AlarmTypes,
+			SendUpdates:   cfg.Events.SendUpdates,
+			SendEnds:      cfg.Events.SendEnds,
+			MaxAttempts:   cfg.Events.MaxAttempts,
+			RetryBase:     time.Duration(cfg.Events.RetryBaseMS) * time.Millisecond,
+			RetryMax:      time.Duration(cfg.Events.RetryMaxMS) * time.Millisecond,
+			SendTimeout:   time.Duration(cfg.Events.SendTimeoutMS) * time.Millisecond,
+		}, subscriber, ua, log)
+		if err != nil {
+			return fmt.Errorf("open analytics delivery: %w", err)
+		}
+		go func() {
+			if err := events.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error("analytics delivery stopped", "error", err)
+			}
+		}()
 	}
 	go keepaliveLoop(ctx, ua, cfg, log)
 

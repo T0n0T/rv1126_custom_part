@@ -173,8 +173,9 @@ B2/B3 生产分析分支；资源恢复后的最小入口固定使用 `/dev/vide
 第一阶段已实现：`event_codec.{c,h}` 统一 IPC 与 JSONL 事件格式，
 `event_journal.{c,h}` 提供有界追加、`fsync`、启动恢复、损坏尾部截断、游标重放、
 缺口检测及 START/END 保护；`media.subscribe_events` 和 `media.ack_events` 已接入
-media_engine Unix socket。当前 ACK 只在连接生命周期内维护，daemon 持久化游标、
-证据缓存和 outbox 仍属于后续 C 阶段。
+media_engine Unix socket。当前 media_engine ACK 只在连接生命周期内维护；daemon
+已将事件持久写入自己的 JSONL outbox 后再 ACK，并在重启时从持久游标恢复。证据
+缓存和运行态 WVP/SIP 验收仍属于后续门禁。
 
 #### B7 验证
 
@@ -195,14 +196,22 @@ media_engine Unix socket。当前 ACK 只在连接生命周期内维护，daemon
 - 守护进程重启后 resume，未确认记录重放；
 - 本地桥错误进入健康指标，不阻塞 SIP 注册/点播。
 
+首版已实现 `media.RPC.ConsumeEvents`：收到事件后由 daemon outbox 先同步落盘，
+再发送 `media.ack_events`；断线按持久 `after_cursor` 重连。replay gap 会进入日志，
+不会被静默当作完整历史。
+
 #### C2 DeliveryOutbox
 
-- 守护进程侧持久 outbox（追加 JSONL + fsync + 原子压缩）；
+- 守护进程侧持久 outbox（版本化 JSONL + fsync + 有界容量 + 原子 snapshot 压缩）；
 - 每个记录分别维护 Alarm 与 Evidence 两个 sink 状态；
 - durable ingest 前崩溃由生产者重放，之后崩溃由 outbox 恢复；
 - 图片内容在确认前复制/硬链接进 outbox 或取得持久租约；
 - 幂等键：设备/通道、`event_id`、阶段、事件内序号；
-- 成功 sink 不因另一 sink 失败重发；重试耗尽进入失败状态并保持可观测。
+- 成功 sink 不因另一 sink 失败重发；重试耗尽进入失败状态并保持可观测；重试时间
+  持久化，使用带抖动的有界指数退避。
+
+首版已实现 Alarm/Evidence 独立状态、设备/通道/事件幂等键、durable ACK 顺序、有界
+outbox、原子压缩和有限重试；精确证据状态暂为 disabled，不能据此宣称 T7 完成。
 
 #### C3 AlarmSink
 
@@ -212,6 +221,9 @@ media_engine Unix socket。当前 ACK 只在连接生命周期内维护，daemon
 - 默认 `START`；`UPDATE` 默认关；stock WVP 下 `END` 默认关；
 - SIP 响应/超时/注册状态进入重试决策；本地写入成功不等于平台投递成功；
 - 黄金 XML 与解析器级测试：转义、必填字段、时区、Unicode、无图片字节。
+
+首版已实现标准字段、事件时间映射、转义、类型映射、独立 SN 和稳定重试 SN 的
+主机测试；真实 SIP/WVP 互操作仍未验证。
 
 #### C4 EvidenceSink
 
@@ -259,7 +271,7 @@ media_engine Unix socket。当前 ACK 只在连接生命周期内维护，daemon
 | RockIVA 模型文件 | 待确认 | `/oem/usr/lib` 下模型与 `coreMask` 对应 |
 | MPP JPEG 编码 | 已见 `mppjpegenc` | 板端时延/质量实测 |
 | 现有 `media_engine` 管线 | 已落地 | 常驻采集、tee、RGA、IPC |
-| 现有 `gb28181_daemon` | 已落地 | SIP 注册/心跳/会话；Alarm 待补 |
+| 现有 `gb28181_daemon` | 已落地 | SIP 注册/心跳/会话；事件订阅、outbox 和 Alarm 主机代码已落地 |
 | WVP 2.7.4 + ZLM | 已用于联调 | exact 模式需单独适配器 |
 
 ## 5. 风险与缓解

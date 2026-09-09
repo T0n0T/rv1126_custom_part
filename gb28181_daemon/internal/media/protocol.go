@@ -55,3 +55,33 @@ type statusResult struct {
 	FPS     int  `json:"fps"`
 	Bitrate int  `json:"bitrate"`
 }
+
+type eventSubscribeParams struct {
+	AfterCursor uint64 `json:"after_cursor"`
+}
+
+type eventSubscribeResult struct {
+	Subscribed   bool   `json:"subscribed"`
+	ReplayGap    bool   `json:"replay_gap"`
+	OldestCursor uint64 `json:"oldest_cursor"`
+	LatestCursor uint64 `json:"latest_cursor"`
+}
+
+type eventNotificationParams struct {
+	Event     string         `json:"event"`
+	Cursor    uint64         `json:"cursor"`
+	Analytics AnalyticsEvent `json:"analytics"`
+}
+
+type eventAckParams struct {
+	Cursor uint64 `json:"cursor"`
+}
+
+type rpcEnvelope struct {
+	V      int             `json:"v"`
+	ID     uint64          `json:"id"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *rpcError       `json:"error,omitempty"`
+}

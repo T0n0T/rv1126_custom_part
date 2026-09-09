@@ -118,19 +118,23 @@ does not replace T1/T3 board analysis acceptance.
       `media.ack_events` 可确认当前连接的消费进度。
 - [x] 队满优先保护 START/END，并统计 UPDATE 丢弃；`event_journal_test` 覆盖重启、
       损坏尾部、重放、缺口和边界保护。
-- [ ] daemon 持久 ACK、断线恢复、证据缓存和 DeliveryOutbox 尚未实现，T5 端到端门禁
-      保持未完成。
+- [x] daemon 持久 ACK、断线恢复、幂等接收和 DeliveryOutbox 已实现；先落盘再 ACK，
+      重启从 durable cursor 恢复，Alarm/Evidence sink 状态独立。
+- [ ] 证据缓存和 WVP/真板端到端门禁仍未完成；daemon outbox 压缩、容量和损坏恢复
+      主机测试已通过。
 
 实现证据：`make -C media_engine/tests clean all`、
 `make -C media_engine RK_APP_OUTPUT=/tmp/media_engine-app-output APP_STUB_DIR=/tmp/media_engine-app-stub PKG_BIN=/tmp/media_engine-wip-build -B all`。
 
 ## T6 daemon Outbox 与标准 Alarm
 
-- [ ] daemon 重启后未确认事件可恢复，幂等键稳定。
-- [ ] Alarm/Evidence sink 状态独立，成功 sink 不重复发送。
-- [ ] 黄金 XML 和解析器断言覆盖转义、时区、Unicode、序号回绕和必需字段。
-- [ ] 标准 Alarm 不包含 JPEG/Base64/本地路径，默认只发送 START。
-- [ ] SIP 超时、拒绝、未注册和重试耗尽可观测。
+- [x] daemon 重启后未确认事件可恢复，幂等键稳定。
+- [x] Alarm/Evidence sink 状态独立，成功 sink 不重复发送；Evidence 当前 disabled。
+- [x] Alarm XML 主机测试覆盖转义、事件时间、类型映射和必需字段；运行态 WVP 仍待验收。
+- [x] 标准 Alarm 不包含 JPEG/Base64/本地路径，默认只发送 START。
+- [x] SIP 超时、拒绝、未注册和重试耗尽可观测；真实 SIP/WVP 运行态仍待补。
+- [x] replay gap 进入 fail-stop；重试时间持久化，退避带抖动且有上限；AlarmType
+      可按事件类型配置覆盖。
 
 ## T7 精确证据 Sink
 

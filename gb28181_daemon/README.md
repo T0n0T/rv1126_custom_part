@@ -1,9 +1,8 @@
 # gb28181_daemon
 
-RV1126B IPC 的 GB28181 信令守护进程（Go）。当前为**骨架版本**：SIP 注册、
-心跳、Catalog/DeviceInfo 应答、INVITE/BYE 会话管理都已接线，媒体侧通过
-`media.Controller` 接口解耦，等待 `media_engine`（C/GStreamer）落地后接入
-unix socket RPC。
+RV1126B IPC 的 GB28181 信令守护进程（Go）。SIP 注册、心跳、
+Catalog/DeviceInfo 应答、INVITE/BYE 会话管理和媒体 unix socket RPC 已接线；
+可选的人流事件链路通过长连接订阅、持久 outbox 和标准 Alarm MESSAGE 投递。
 
 ## 目录结构
 
@@ -14,12 +13,14 @@ internal/
   config/            配置加载与校验
   gbxml/             GB/T 28181 XML 报文（解析与构造）
   media/             媒体控制接口 + unix socket JSON RPC 客户端 + Noop
+  delivery/          事件订阅、持久接收、Alarm sink 与重试
+  outbox/            daemon 侧 JSONL 事件/游标/sink 状态
   session/           直播会话注册表（Call-ID -> Live）
   sipua/             sipgo 封装：UAC 注册/Digest、UAS 消息/INVITE/BYE
 configs/             示例配置
 ```
 
-依赖方向保持单向：`app -> {config, gbxml, media, session, sipua}`，`sipua`
+依赖方向保持单向：`app -> {config, delivery, gbxml, media, session, sipua}`，`sipua`
 不依赖 GB XML 和媒体实现，`media` 不依赖 SIP。
 
 ## 构建与测试
@@ -50,6 +51,16 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -buildvcs=false -o bin/gb28181-da
 - `media.simulate=true`：Noop 控制器假装成功，用于在没有 media_engine 时
   联调 WVP 的完整 SIP 闭环（注册→目录→INVITE→ACK→BYE）。
 - `stream`：INVITE 协商后下发给媒体引擎的编码参数。
+- `events.enabled=true`：启用 media_engine 长连接事件订阅和持久 Alarm outbox，
+  要求 `media.mode=rpc`；默认只发送 `START`，`UPDATE/END` 需要显式打开。
+- `events.outbox_path`：daemon 持久接收日志；事件落盘成功后才向 media_engine ACK。
+- `events.max_records` / `events.max_bytes`：outbox 的记录数和字节上限；达到压力时
+  优先保留 `START/END`，允许丢弃并计数 `UPDATE`。边界事件无法安全落盘时事件桥停
+  止并报告错误，不会静默确认。
+- `events.alarm_types`：按 `event_type` 覆盖默认 AlarmType（越线 `5`、入侵 `6`、
+  人流统计 `9`）；重试采用带抖动的有界指数退避，重试时间也写入 outbox。
+- 如果 media_engine 报告 `replay_gap`，daemon 会进入 fail-stop，等待人工处理日志
+  缺口，不会把不完整历史当成连续事件。
 - `channels`：目录上报的通道列表，INVITE 只接受列表内的通道。
 
 ## IO 控制（测试桩）
@@ -86,7 +97,9 @@ A.3.7，PTZCmd 字节 4 为 `8CH` 开 / `8DH` 关，字节 5 为开关编号）�
 - [x] INVITE → 200(SDP) → ACK → 启动媒体 → BYE → 停止媒体（sipua 层完成，
       媒体实现待接入；spike 中用 ffmpeg 验证过同一流程）
 - [x] DeviceControl（IO 测试桩）：辅助开关 PTZCmd 8CH/8DH 触发时打印到 stdout
-- [ ] media_engine RPC 服务端（C/GStreamer）
+- [x] media_engine RPC 控制与事件订阅服务端（C/GStreamer）
+- [x] 人流事件持久接收、游标恢复、Alarm XML 构建和 SIP 重试 outbox
+- [ ] 真实板端 RockIVA 长期稳定性与 stock WVP Alarm 互操作验收
 - [ ] 控制协议正式定稿（hello/版本协商、错误码表）
 - [ ] PTZ / 报警 / 抓图 / 对讲（真实 IO/GPIO 接入）
 
