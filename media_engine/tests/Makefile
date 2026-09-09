@@ -35,14 +35,21 @@ event_journal_test: event_journal_test.c ../src/analytics/event_journal.c \
 	$(CC) $(CFLAGS) $(PKG_CFLAGS) -I../third_party/cJSON -o $@ $^ \
 		$(PKG_LIBS) -lm
 
+evidence_cache_test: evidence_cache_test.c ../src/analytics/evidence_cache.c \
+		../src/analytics/event_engine.c ../src/analytics/config.c \
+		../src/analytics/observation.c ../third_party/cJSON/cJSON.c
+	$(CC) $(CFLAGS) $(PKG_CFLAGS) -I../third_party/cJSON -o $@ $^ \
+		$(PKG_LIBS) -lm
+
 run: session_mgr_test config_test observation_test event_engine_test \
-		event_journal_test
+		event_journal_test evidence_cache_test
 	./session_mgr_test
 	./config_test
 	./observation_test
 	./event_engine_test
 	./event_journal_test
+	./evidence_cache_test
 
 clean:
 	rm -f session_mgr_test config_test observation_test event_engine_test \
-		event_journal_test
+		event_journal_test evidence_cache_test

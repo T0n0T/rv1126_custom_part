@@ -5,6 +5,7 @@
 #include <glib.h>
 
 #include <string.h>
+#include <strings.h>
 
 typedef struct {
 	Engine *engine;
@@ -52,7 +53,8 @@ static void engine_analytics_event(void *userdata, const MeAnalyticsEvent *event
 {
 	Engine *e = userdata;
 	AnalyticsEventDispatch *dispatch;
-	char err[128] = {0};
+	MeAnalyticsEvent event_copy;
+	char err[256] = {0};
 	uint64_t cursor = 0;
 	int rc;
 
@@ -63,7 +65,17 @@ static void engine_analytics_event(void *userdata, const MeAnalyticsEvent *event
 		       "analytics event not delivered: durable event journal unavailable");
 		return;
 	}
-	rc = me_event_journal_append(e->event_journal, event, &cursor, err,
+	event_copy = *event;
+	if (!strcasecmp(e->cfg.analytics.evidence_mode, "exact_evidence")) {
+		rc = gst_runner_capture_evidence(e->runner, &event_copy, err,
+								 sizeof(err));
+		if (rc < 0)
+			me_log(ME_LOG_WARN, "exact evidence capture failed: %s", err);
+		else if (rc > 0)
+			me_log(ME_LOG_WARN, "exact evidence unavailable for event %s: %s",
+			       event->event_id, err[0] ? err : "no matching JPEG");
+	}
+	rc = me_event_journal_append(e->event_journal, &event_copy, &cursor, err,
 							 sizeof(err));
 	if (rc > 0) {
 		me_log(ME_LOG_WARN, "analytics UPDATE dropped by event journal pressure");
@@ -79,7 +91,7 @@ static void engine_analytics_event(void *userdata, const MeAnalyticsEvent *event
 		return;
 	}
 	dispatch->engine = e;
-	dispatch->event = *event;
+	dispatch->event = event_copy;
 	dispatch->cursor = cursor;
 	g_main_context_invoke(NULL, deliver_analytics_event, dispatch);
 }
@@ -92,6 +104,7 @@ static void engine_analytics_observation(
 
 	if (!e || !e->analytics_initialized || !observation)
 		return;
+	gst_runner_note_analytics_frame(e->runner, observation);
 	if (me_event_engine_process(&e->analytics, observation, err, sizeof(err)) <
 	    0)
 		me_log(ME_LOG_WARN, "analytics observation rejected: %s", err);
@@ -165,6 +178,7 @@ void engine_deinit(Engine *e)
 		return;
 	session_mgr_free(e->sessions);
 	gst_runner_free(e->runner);
+	e->runner = NULL;
 	if (e->analytics_initialized) {
 		/* Close the last lifecycle before clearing the engine. The main loop
 		 * drains the queued delivery in main() while the IPC server is alive. */

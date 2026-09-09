@@ -1,15 +1,18 @@
 #include "gst/gst_runner.h"
 #include "gst/me_rga_rotate.h"
 
+#include "analytics/evidence_cache.h"
 #include "analytics/rockiva_runner.h"
 
 #include "common/me_errors.h"
 #include "common/util.h"
 
 #include <gst/gst.h>
+#include <gst/app/gstappsink.h>
 #include <glib.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #define ME_GST_BASE_READY_TIMEOUT (5 * GST_SECOND)
 
@@ -28,6 +31,8 @@ struct GstRunner {
 	GstElement *pipeline;
 	GstElement *tee;
 	MeRockivaRunner *analytics;
+	MeEvidenceCache *evidence_cache;
+	GstElement *evidence_sink;
 	char analytics_channel_id[ME_ANALYTICS_CHANNEL_ID_MAX];
 	uint64_t analytics_stream_epoch;
 	guint bus_watch;
@@ -44,6 +49,55 @@ static void runner_emit_event(GstRunner *r, const char *event,
 {
 	if (r->event_cb)
 		r->event_cb(r->event_userdata, event, session_id, message);
+}
+
+static bool exact_evidence_enabled(const EngineConfig *cfg)
+{
+	return cfg && cfg->analytics.enabled &&
+		!strcasecmp(cfg->analytics.evidence_mode, "exact_evidence");
+}
+
+static const char *available_jpeg_encoder(void)
+{
+	GstElementFactory *factory = gst_element_factory_find("mppjpegenc");
+	if (factory) {
+		gst_object_unref(factory);
+		return "mppjpegenc";
+	}
+	factory = gst_element_factory_find("jpegenc");
+	if (factory) {
+		gst_object_unref(factory);
+		return "jpegenc";
+	}
+	return NULL;
+}
+
+static GstFlowReturn evidence_new_sample_callback(GstAppSink *sink,
+							 gpointer userdata)
+{
+	GstRunner *r = userdata;
+	GstSample *sample;
+	GstBuffer *buffer;
+	GstMapInfo map;
+	GstClockTime pts;
+	bool pts_valid;
+
+	if (!r || !r->evidence_cache)
+		return GST_FLOW_OK;
+	sample = gst_app_sink_pull_sample(sink);
+	if (!sample)
+		return GST_FLOW_OK;
+	buffer = gst_sample_get_buffer(sample);
+	if (buffer && gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+		pts = GST_BUFFER_PTS(buffer);
+		pts_valid = pts != GST_CLOCK_TIME_NONE && pts <= INT64_MAX;
+		(void)me_evidence_cache_push_jpeg(
+			r->evidence_cache, map.data, map.size, pts_valid,
+			pts_valid ? (int64_t)pts : 0);
+		gst_buffer_unmap(buffer, &map);
+	}
+	gst_sample_unref(sample);
+	return GST_FLOW_OK;
 }
 
 /* ---------- base pipeline ---------- */
@@ -82,16 +136,36 @@ static GstElement *build_base_pipeline(const EngineConfig *cfg, char **err_text)
 	if (cfg->analytics.enabled) {
 		g_string_append_printf(
 		    s,
-		    " t. ! queue max-size-buffers=4 leaky=downstream");
-		g_string_append_printf(
-		    s,
+		    " t. ! queue max-size-buffers=4 leaky=downstream"
 		    " ! rgarotate rotation=0 out-width=%d out-height=%d"
 		    " ! videorate drop-only=true"
-		    " ! video/x-raw,format=NV12,width=%d,height=%d,framerate=%d/1"
-		    " ! appsink name=analytics-sink emit-signals=false sync=false async=false"
-		    " max-buffers=4 drop=true wait-on-eos=false enable-last-sample=false",
+		    " ! video/x-raw,format=NV12,width=%d,height=%d,framerate=%d/1",
 		    cfg->analytics.width, cfg->analytics.height, cfg->analytics.width,
 		    cfg->analytics.height, cfg->analytics.fps);
+		if (exact_evidence_enabled(cfg)) {
+			const char *encoder = available_jpeg_encoder();
+
+			g_string_append(s, " ! tee name=analytics-tee "
+					"analytics-tee. ! appsink name=analytics-sink "
+					"emit-signals=false sync=false async=false max-buffers=4 "
+					"drop=true wait-on-eos=false enable-last-sample=false");
+			if (encoder) {
+				g_string_append_printf(
+				    s,
+				    " analytics-tee. ! queue max-size-buffers=4 "
+				    "leaky=downstream ! videoconvert ! %s ! "
+				    "appsink name=evidence-sink emit-signals=false sync=false "
+				    "async=false max-buffers=4 drop=true wait-on-eos=false "
+				    "enable-last-sample=false",
+				    encoder);
+			}
+		} else {
+			g_string_append(
+			    s,
+			    " ! appsink name=analytics-sink emit-signals=false "
+			    "sync=false async=false max-buffers=4 drop=true "
+			    "wait-on-eos=false enable-last-sample=false");
+		}
 	}
 
 	pipe = gst_parse_launch(s->str, &gerr);
@@ -471,6 +545,32 @@ int gst_runner_snapshot(GstRunner *r, const char *channel_id,
 	return ME_ERR_MEDIA;
 }
 
+void gst_runner_note_analytics_frame(GstRunner *r,
+						 const MeNormalizedObservation *observation)
+{
+	if (!r || !r->evidence_cache || !observation)
+		return;
+	(void)me_evidence_cache_note_frame(
+		r->evidence_cache, observation->channel_id, observation->stream_epoch,
+		observation->frame_id, observation->source_pts_valid,
+		observation->source_pts, observation->source_timebase,
+		observation->frame_width,
+		observation->frame_height);
+}
+
+int gst_runner_capture_evidence(GstRunner *r, MeAnalyticsEvent *event,
+						char *err, size_t errsz)
+{
+	if (!r || !event)
+		return -1;
+	if (!r->evidence_cache) {
+		me_set_err(err, errsz, "exact evidence cache is unavailable");
+		return 1;
+	}
+	return me_evidence_cache_capture(r->evidence_cache, event, NULL, err,
+								 errsz);
+}
+
 void gst_runner_status(GstRunner *r, bool *running, int *fps, int *bitrate)
 {
 	*running = r->branch_active;
@@ -491,6 +591,7 @@ GstRunner *gst_runner_new(const EngineConfig *cfg,
 	char *parse_err = NULL;
 	bool playing = false;
 	GstElement *analytics_sink = NULL;
+	GstAppSinkCallbacks evidence_callbacks = {0};
 
 	r = g_new0(GstRunner, 1);
 	r->cfg = *cfg;
@@ -500,6 +601,18 @@ GstRunner *gst_runner_new(const EngineConfig *cfg,
 
 	gst_init(NULL, NULL);
 	me_rga_rotate_register();
+	if (exact_evidence_enabled(cfg)) {
+		r->evidence_cache = me_evidence_cache_open(
+			cfg->snapshot_dir, cfg->analytics.evidence_max_bytes,
+			cfg->analytics.evidence_retention_s, err, errsz);
+		if (!r->evidence_cache) {
+			me_log(ME_LOG_WARN,
+			       "exact evidence cache unavailable; continuing without JPEG evidence: %s",
+			       err && err[0] ? err : "unknown error");
+			if (err && errsz > 0)
+				err[0] = '\0';
+		}
+	}
 
 	r->pipeline = build_base_pipeline(cfg, &parse_err);
 	if (!r->pipeline) {
@@ -508,6 +621,8 @@ GstRunner *gst_runner_new(const EngineConfig *cfg,
 		g_free(parse_err);
 		me_log(ME_LOG_ERROR, "base pipeline create failed: %s",
 		       r->base_error);
+		me_evidence_cache_close(r->evidence_cache);
+		r->evidence_cache = NULL;
 		me_set_err(err, errsz, "base pipeline create failed: %s",
 		           r->base_error);
 		return r;
@@ -521,6 +636,8 @@ GstRunner *gst_runner_new(const EngineConfig *cfg,
 		gst_element_set_state(r->pipeline, GST_STATE_NULL);
 		gst_object_unref(r->pipeline);
 		r->pipeline = NULL;
+		me_evidence_cache_close(r->evidence_cache);
+		r->evidence_cache = NULL;
 		me_set_err(err, errsz, "%s", r->base_error);
 		return r;
 	}
@@ -544,6 +661,21 @@ GstRunner *gst_runner_new(const EngineConfig *cfg,
 				       "RockIVA analytics unavailable; continuing with video only");
 				if (err && errsz > 0)
 					err[0] = '\0';
+			}
+		}
+		if (r->evidence_cache) {
+			r->evidence_sink = gst_bin_get_by_name(
+				GST_BIN(r->pipeline), "evidence-sink");
+			if (r->evidence_sink) {
+				evidence_callbacks.new_sample =
+					evidence_new_sample_callback;
+				gst_app_sink_set_callbacks(
+					GST_APP_SINK(r->evidence_sink), &evidence_callbacks, r,
+					NULL);
+			} else {
+				me_log(ME_LOG_WARN,
+				       "exact evidence encoder branch is unavailable; "
+				       "continuing without JPEG evidence");
 			}
 		}
 		if (r->analytics) {
@@ -642,12 +774,21 @@ void gst_runner_free(GstRunner *r)
 		}
 		r->analytics = NULL;
 	}
+	if (r->evidence_sink)
+		gst_app_sink_set_callbacks(GST_APP_SINK(r->evidence_sink), NULL, NULL,
+		                           NULL);
+	if (r->evidence_sink)
+		gst_object_unref(r->evidence_sink);
+	r->evidence_sink = NULL;
+	if (r->pipeline)
+		gst_element_set_state(r->pipeline, GST_STATE_NULL);
+	me_evidence_cache_close(r->evidence_cache);
+	r->evidence_cache = NULL;
 	if (r->bus_watch) {
 		g_source_remove(r->bus_watch);
 		r->bus_watch = 0;
 	}
 	if (r->pipeline) {
-		gst_element_set_state(r->pipeline, GST_STATE_NULL);
 		gst_object_unref(r->pipeline);
 	}
 	if (r->tee)

@@ -58,3 +58,32 @@ func TestEnabledEventsValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestEnabledEvidenceRequiresHTTPEndpoint(t *testing.T) {
+	cfg := validConfigForTest()
+	cfg.Events.Enabled = true
+	cfg.Events.EvidenceEnabled = true
+	cfg.Events.EvidenceDir = "/tmp/media-evidence"
+	cfg.Events.EvidenceURL = "http://127.0.0.1:18080/evidence"
+	cfg.Events.EvidenceToken = "secret"
+	if err := cfg.validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, endpoint := range []string{"", "/relative", "ftp://127.0.0.1/evidence"} {
+		candidate := *cfg
+		candidate.Events.EvidenceURL = endpoint
+		if err := candidate.validate(); err == nil {
+			t.Fatalf("validate accepted evidence endpoint %q", endpoint)
+		}
+	}
+	candidate := *cfg
+	candidate.Events.EvidenceToken = ""
+	if err := candidate.validate(); err == nil {
+		t.Fatal("validate accepted evidence without bearer token")
+	}
+	disabled := validConfigForTest()
+	disabled.Events.EvidenceEnabled = true
+	if err := disabled.validate(); err == nil {
+		t.Fatal("validate accepted evidence while events are disabled")
+	}
+}

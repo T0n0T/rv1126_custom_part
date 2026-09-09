@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送——实施计划
 
-状态：实施中（T1 探针和 T3 常驻分析代码已提供；CPU-NV12、隔离原生 DMA-BUF、一轮 60 帧有人场景及 GStreamer 单内存 DMA-BUF 子门禁证据已有，但因设备资源达到本轮上限暂时暂停更高占用板端复测；T2/T4 已完成，T5 第一阶段事件日志与 IPC 订阅桥已实现）
+状态：实施中（T1 探针和 T3 常驻分析代码已提供；CPU-NV12、隔离原生 DMA-BUF、一轮 60 帧有人场景及 GStreamer 单内存 DMA-BUF 子门禁证据已有，但因设备资源达到本轮上限暂时暂停更高占用板端复测；T2/T4 已完成，T5 主机 EvidenceCache/事件日志/IPC 订阅桥和 T6/T7 主机投递代码已实现，板端/WVP 运行态仍未验收）
 上游规格：`docs/people-flow-alarm/spec.md`
 下游产物：`task.md`、`checklist.md`（另行创建）
 本阶段约束：T1 真板结果仍是 T3 生产验收和参数固化的硬门禁；当前允许先推进主机
@@ -174,8 +174,10 @@ B2/B3 生产分析分支；资源恢复后的最小入口固定使用 `/dev/vide
 `event_journal.{c,h}` 提供有界追加、`fsync`、启动恢复、损坏尾部截断、游标重放、
 缺口检测及 START/END 保护；`media.subscribe_events` 和 `media.ack_events` 已接入
 media_engine Unix socket。当前 media_engine ACK 只在连接生命周期内维护；daemon
-已将事件持久写入自己的 JSONL outbox 后再 ACK，并在重启时从持久游标恢复。证据
-缓存和运行态 WVP/SIP 验收仍属于后续门禁。
+已将事件持久写入自己的 JSONL outbox 后再 ACK，并在重启时从持久游标恢复。exact
+模式下 daemon 还会在 ACK 前校验并复制 JPEG/JSON 到自己的证据目录，再由独立 HTTP
+EvidenceSink 上传；证据失败不阻塞 Alarm。板端 JPEG 编码、WVP 适配和运行态验收仍属于
+后续门禁。
 
 #### B7 验证
 
@@ -211,7 +213,8 @@ media_engine Unix socket。当前 media_engine ACK 只在连接生命周期内�
   持久化，使用带抖动的有界指数退避。
 
 首版已实现 Alarm/Evidence 独立状态、设备/通道/事件幂等键、durable ACK 顺序、有界
-outbox、原子压缩和有限重试；精确证据状态暂为 disabled，不能据此宣称 T7 完成。
+outbox、原子压缩和有限重试；stock 模式下 Evidence 为 disabled，exact 模式下证据
+先复制再 ACK，并由 HTTP sink 独立重试。WVP 适配和真板运行态仍不能据此宣称完成。
 
 #### C3 AlarmSink
 
@@ -227,9 +230,9 @@ outbox、原子压缩和有限重试；精确证据状态暂为 disabled，不�
 
 #### C4 EvidenceSink
 
-- `exact_evidence` 模式：HTTP 上传或平台拉取适配器；
-- 认证、校验和、幂等、独立重试、与 Alarm 到达顺序解耦；
-- 证据失败不阻塞 Alarm sink。
+- `exact_evidence` 模式：daemon 复制端侧 JPEG/JSON 后通过 HTTP multipart 上传；
+- Bearer 认证、SHA-256 校验、幂等键、独立重试、与 Alarm 到达顺序解耦；
+- 证据失败不阻塞 Alarm sink；当前 HTTP endpoint 是适配器契约，尚未替代 WVP 本身。
 
 门禁：
 
@@ -309,6 +312,7 @@ outbox、原子压缩和有限重试；精确证据状态暂为 disabled，不�
 
 1. 设备资源恢复后，在真实 RV1126B 的隔离 `/dev/video25` 上重复有人场景 T1 RockIVA
    probe，再补齐完整流 epoch、主编码连续性、点播并发和资源预算证据；
-2. 在 T3 板端门禁之外继续完成事件日志的 daemon 订阅客户端、持久 ACK、DeliveryOutbox
-   和标准 GB28181 Alarm sink；真板验证仍只使用 `/dev/video25`，不得操作 `/dev/video24`；
-3. T1/T3/T5/T6 的主机与板端证据齐备后，再推进 WVP 兼容和发布验收。
+2. 在 T3 板端门禁之外，用 `exact_evidence` 配置完成板端 JPEG 分支/缓存时延与容量
+   复测；真板验证仍只使用 `/dev/video25`，不得操作 `/dev/video24`；
+3. 提供并验证 WVP 侧 HTTP 证据适配器，再做 Alarm/Evidence 乱序、重复、重启恢复和
+   stock WVP 兼容验收。

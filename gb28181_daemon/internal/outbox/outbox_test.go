@@ -89,6 +89,44 @@ func TestStorePersistsAckAndIndependentSinkState(t *testing.T) {
 	}
 }
 
+func TestStorePersistsEvidenceRetryState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "delivery.jsonl")
+	store, err := Open(path, Options{DeviceID: "device-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := testEvent(media.EventPhaseStart, 1)
+	event.EvidenceID = "ev-1"
+	record, added, err := store.EnqueueWithEvidence(event, 21, true, true)
+	if err != nil || !added || record.EvidenceState != StatePending {
+		t.Fatalf("enqueue evidence event: added=%v record=%+v err=%v", added, record, err)
+	}
+	retryAt := time.Now().Add(time.Minute).Truncate(time.Nanosecond)
+	if _, err := store.MarkEvidenceAttempt(record.Key, errors.New("temporary"), false, retryAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path, Options{DeviceID: "device-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	restored := store.Records()[0]
+	if restored.EvidenceState != StatePending || restored.EvidenceAttempts != 1 ||
+		restored.EvidenceNextRetryAtUnixNano != retryAt.UnixNano() ||
+		restored.EvidenceError != "temporary" {
+		t.Fatalf("evidence retry state was not restored: %+v", restored)
+	}
+	if err := store.MarkEvidenceSent(restored.Key); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Records()[0].EvidenceState; got != StateSent {
+		t.Fatalf("evidence state after success = %q, want %q", got, StateSent)
+	}
+}
+
 func TestStoreDeduplicatesReplayByEventPhase(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "delivery.jsonl"), Options{DeviceID: "device-1"})
 	if err != nil {

@@ -114,19 +114,25 @@ func Run(ctx context.Context, cfg *config.Config) error {
 			return fmt.Errorf("events enabled but media controller has no event subscriber")
 		}
 		events, err := delivery.New(delivery.Config{
-			DeviceID:      cfg.SIP.DeviceID,
-			OutboxPath:    cfg.Events.OutboxPath,
-			MaxRecords:    cfg.Events.MaxRecords,
-			MaxBytes:      cfg.Events.MaxBytes,
-			AlarmPriority: cfg.Events.AlarmPriority,
-			AlarmMethod:   cfg.Events.AlarmMethod,
-			AlarmTypes:    cfg.Events.AlarmTypes,
-			SendUpdates:   cfg.Events.SendUpdates,
-			SendEnds:      cfg.Events.SendEnds,
-			MaxAttempts:   cfg.Events.MaxAttempts,
-			RetryBase:     time.Duration(cfg.Events.RetryBaseMS) * time.Millisecond,
-			RetryMax:      time.Duration(cfg.Events.RetryMaxMS) * time.Millisecond,
-			SendTimeout:   time.Duration(cfg.Events.SendTimeoutMS) * time.Millisecond,
+			DeviceID:          cfg.SIP.DeviceID,
+			OutboxPath:        cfg.Events.OutboxPath,
+			MaxRecords:        cfg.Events.MaxRecords,
+			MaxBytes:          cfg.Events.MaxBytes,
+			AlarmPriority:     cfg.Events.AlarmPriority,
+			AlarmMethod:       cfg.Events.AlarmMethod,
+			AlarmTypes:        cfg.Events.AlarmTypes,
+			SendUpdates:       cfg.Events.SendUpdates,
+			SendEnds:          cfg.Events.SendEnds,
+			MaxAttempts:       cfg.Events.MaxAttempts,
+			RetryBase:         time.Duration(cfg.Events.RetryBaseMS) * time.Millisecond,
+			RetryMax:          time.Duration(cfg.Events.RetryMaxMS) * time.Millisecond,
+			SendTimeout:       time.Duration(cfg.Events.SendTimeoutMS) * time.Millisecond,
+			EvidenceEnabled:   cfg.Events.EvidenceEnabled,
+			EvidenceDir:       cfg.Events.EvidenceDir,
+			EvidenceOutboxDir: cfg.Events.EvidenceOutboxDir,
+			EvidenceMaxBytes:  cfg.Events.EvidenceMaxBytes,
+			EvidenceURL:       cfg.Events.EvidenceURL,
+			EvidenceToken:     cfg.Events.EvidenceToken,
 		}, subscriber, ua, log)
 		if err != nil {
 			return fmt.Errorf("open analytics delivery: %w", err)

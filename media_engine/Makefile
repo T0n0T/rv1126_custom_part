@@ -51,6 +51,7 @@ SRCS := src/main.c \
 	src/analytics/event_engine.c \
 	src/analytics/event_codec.c \
 	src/analytics/event_journal.c \
+	src/analytics/evidence_cache.c \
 	src/analytics/rockiva_runner.c \
 	src/config/config.c \
 		src/engine/engine.c \

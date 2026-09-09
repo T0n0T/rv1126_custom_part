@@ -25,6 +25,7 @@ const (
 	DefaultMaxRecords = 4096
 	DefaultMaxBytes   = int64(16 << 20)
 	StatePending      = "pending"
+	StateStaging      = "staging"
 	StateSent         = "sent"
 	StateIgnored      = "ignored"
 	StateDead         = "dead"
@@ -49,49 +50,55 @@ type Options struct {
 // Record is one idempotent event phase and the independent sink states that
 // must survive a daemon restart.
 type Record struct {
-	Key                      string
-	Cursor                   uint64
-	Event                    media.AnalyticsEvent
-	AlarmState               string
-	EvidenceState            string
-	AlarmSN                  uint64
-	AlarmAttempts            int
-	AlarmLastError           string
-	AlarmNextRetryAtUnixNano int64
-	EvidenceError            string
+	Key                         string
+	Cursor                      uint64
+	Event                       media.AnalyticsEvent
+	AlarmState                  string
+	EvidenceState               string
+	AlarmSN                     uint64
+	AlarmAttempts               int
+	AlarmLastError              string
+	AlarmNextRetryAtUnixNano    int64
+	EvidenceAttempts            int
+	EvidenceNextRetryAtUnixNano int64
+	EvidenceError               string
 }
 
 type journalEntry struct {
-	Version                  int                   `json:"v"`
-	Op                       string                `json:"op"`
-	DeviceID                 string                `json:"device_id,omitempty"`
-	Key                      string                `json:"key,omitempty"`
-	Cursor                   uint64                `json:"cursor,omitempty"`
-	Event                    *media.AnalyticsEvent `json:"event,omitempty"`
-	AlarmState               string                `json:"alarm_state,omitempty"`
-	EvidenceState            string                `json:"evidence_state,omitempty"`
-	AlarmSN                  uint64                `json:"alarm_sn,omitempty"`
-	AlarmAttempts            int                   `json:"alarm_attempts,omitempty"`
-	AlarmLastError           string                `json:"alarm_last_error,omitempty"`
-	AlarmNextRetryAtUnixNano int64                 `json:"alarm_next_retry_at_unix_nano,omitempty"`
-	EvidenceError            string                `json:"evidence_error,omitempty"`
-	NextAlarmSN              uint64                `json:"next_alarm_sn,omitempty"`
-	LastAck                  uint64                `json:"last_ack,omitempty"`
-	DroppedUpdates           uint64                `json:"dropped_updates,omitempty"`
-	Records                  []recordSnapshot      `json:"records,omitempty"`
+	Version                     int                   `json:"v"`
+	Op                          string                `json:"op"`
+	DeviceID                    string                `json:"device_id,omitempty"`
+	Key                         string                `json:"key,omitempty"`
+	Cursor                      uint64                `json:"cursor,omitempty"`
+	Event                       *media.AnalyticsEvent `json:"event,omitempty"`
+	AlarmState                  string                `json:"alarm_state,omitempty"`
+	EvidenceState               string                `json:"evidence_state,omitempty"`
+	AlarmSN                     uint64                `json:"alarm_sn,omitempty"`
+	AlarmAttempts               int                   `json:"alarm_attempts,omitempty"`
+	AlarmLastError              string                `json:"alarm_last_error,omitempty"`
+	AlarmNextRetryAtUnixNano    int64                 `json:"alarm_next_retry_at_unix_nano,omitempty"`
+	EvidenceAttempts            int                   `json:"evidence_attempts,omitempty"`
+	EvidenceNextRetryAtUnixNano int64                 `json:"evidence_next_retry_at_unix_nano,omitempty"`
+	EvidenceError               string                `json:"evidence_error,omitempty"`
+	NextAlarmSN                 uint64                `json:"next_alarm_sn,omitempty"`
+	LastAck                     uint64                `json:"last_ack,omitempty"`
+	DroppedUpdates              uint64                `json:"dropped_updates,omitempty"`
+	Records                     []recordSnapshot      `json:"records,omitempty"`
 }
 
 type recordSnapshot struct {
-	Key                      string               `json:"key"`
-	Cursor                   uint64               `json:"cursor"`
-	Event                    media.AnalyticsEvent `json:"event"`
-	AlarmState               string               `json:"alarm_state"`
-	EvidenceState            string               `json:"evidence_state"`
-	AlarmSN                  uint64               `json:"alarm_sn"`
-	AlarmAttempts            int                  `json:"alarm_attempts"`
-	AlarmLastError           string               `json:"alarm_last_error,omitempty"`
-	AlarmNextRetryAtUnixNano int64                `json:"alarm_next_retry_at_unix_nano,omitempty"`
-	EvidenceError            string               `json:"evidence_error,omitempty"`
+	Key                         string               `json:"key"`
+	Cursor                      uint64               `json:"cursor"`
+	Event                       media.AnalyticsEvent `json:"event"`
+	AlarmState                  string               `json:"alarm_state"`
+	EvidenceState               string               `json:"evidence_state"`
+	AlarmSN                     uint64               `json:"alarm_sn"`
+	AlarmAttempts               int                  `json:"alarm_attempts"`
+	AlarmLastError              string               `json:"alarm_last_error,omitempty"`
+	AlarmNextRetryAtUnixNano    int64                `json:"alarm_next_retry_at_unix_nano,omitempty"`
+	EvidenceAttempts            int                  `json:"evidence_attempts,omitempty"`
+	EvidenceNextRetryAtUnixNano int64                `json:"evidence_next_retry_at_unix_nano,omitempty"`
+	EvidenceError               string               `json:"evidence_error,omitempty"`
 }
 
 // Store is an append-only, versioned JSONL state log. Every mutation is
@@ -278,16 +285,18 @@ func (s *Store) apply(entry journalEntry) error {
 			return fmt.Errorf("event has invalid next_alarm_sn %d", entry.NextAlarmSN)
 		}
 		record := Record{
-			Key:                      entry.Key,
-			Cursor:                   entry.Cursor,
-			Event:                    *entry.Event,
-			AlarmState:               entry.AlarmState,
-			EvidenceState:            entry.EvidenceState,
-			AlarmSN:                  entry.AlarmSN,
-			AlarmAttempts:            entry.AlarmAttempts,
-			AlarmLastError:           entry.AlarmLastError,
-			AlarmNextRetryAtUnixNano: entry.AlarmNextRetryAtUnixNano,
-			EvidenceError:            entry.EvidenceError,
+			Key:                         entry.Key,
+			Cursor:                      entry.Cursor,
+			Event:                       *entry.Event,
+			AlarmState:                  entry.AlarmState,
+			EvidenceState:               entry.EvidenceState,
+			AlarmSN:                     entry.AlarmSN,
+			AlarmAttempts:               entry.AlarmAttempts,
+			AlarmLastError:              entry.AlarmLastError,
+			AlarmNextRetryAtUnixNano:    entry.AlarmNextRetryAtUnixNano,
+			EvidenceAttempts:            entry.EvidenceAttempts,
+			EvidenceNextRetryAtUnixNano: entry.EvidenceNextRetryAtUnixNano,
+			EvidenceError:               entry.EvidenceError,
 		}
 		if err := validateRecord(record); err != nil {
 			return err
@@ -313,6 +322,8 @@ func (s *Store) apply(entry journalEntry) error {
 			record.AlarmNextRetryAtUnixNano = entry.AlarmNextRetryAtUnixNano
 		} else {
 			record.EvidenceState = entry.EvidenceState
+			record.EvidenceAttempts = entry.EvidenceAttempts
+			record.EvidenceNextRetryAtUnixNano = entry.EvidenceNextRetryAtUnixNano
 			record.EvidenceError = entry.EvidenceError
 		}
 		if err := validateRecord(record); err != nil {
@@ -327,16 +338,18 @@ func (s *Store) apply(entry journalEntry) error {
 
 func (snapshot recordSnapshot) record() (Record, error) {
 	record := Record{
-		Key:                      snapshot.Key,
-		Cursor:                   snapshot.Cursor,
-		Event:                    snapshot.Event,
-		AlarmState:               snapshot.AlarmState,
-		EvidenceState:            snapshot.EvidenceState,
-		AlarmSN:                  snapshot.AlarmSN,
-		AlarmAttempts:            snapshot.AlarmAttempts,
-		AlarmLastError:           snapshot.AlarmLastError,
-		AlarmNextRetryAtUnixNano: snapshot.AlarmNextRetryAtUnixNano,
-		EvidenceError:            snapshot.EvidenceError,
+		Key:                         snapshot.Key,
+		Cursor:                      snapshot.Cursor,
+		Event:                       snapshot.Event,
+		AlarmState:                  snapshot.AlarmState,
+		EvidenceState:               snapshot.EvidenceState,
+		AlarmSN:                     snapshot.AlarmSN,
+		AlarmAttempts:               snapshot.AlarmAttempts,
+		AlarmLastError:              snapshot.AlarmLastError,
+		AlarmNextRetryAtUnixNano:    snapshot.AlarmNextRetryAtUnixNano,
+		EvidenceAttempts:            snapshot.EvidenceAttempts,
+		EvidenceNextRetryAtUnixNano: snapshot.EvidenceNextRetryAtUnixNano,
+		EvidenceError:               snapshot.EvidenceError,
 	}
 	if err := validateRecord(record); err != nil {
 		return Record{}, err
@@ -366,12 +379,13 @@ func validateRecord(record Record) error {
 		return fmt.Errorf("unknown alarm state %q", record.AlarmState)
 	}
 	switch record.EvidenceState {
-	case StatePending, StateSent, StateIgnored, StateDead, StateDisabled:
+	case StatePending, StateStaging, StateSent, StateIgnored, StateDead, StateDisabled:
 	default:
 		return fmt.Errorf("unknown evidence state %q", record.EvidenceState)
 	}
-	if record.AlarmAttempts < 0 || record.AlarmNextRetryAtUnixNano < 0 {
-		return errors.New("negative alarm retry state")
+	if record.AlarmAttempts < 0 || record.AlarmNextRetryAtUnixNano < 0 ||
+		record.EvidenceAttempts < 0 || record.EvidenceNextRetryAtUnixNano < 0 {
+		return errors.New("negative sink retry state")
 	}
 	return nil
 }
@@ -509,16 +523,18 @@ func (s *Store) snapshotRecordsLocked() []recordSnapshot {
 	result := make([]recordSnapshot, 0, len(s.records))
 	for _, record := range s.records {
 		result = append(result, recordSnapshot{
-			Key:                      record.Key,
-			Cursor:                   record.Cursor,
-			Event:                    record.Event,
-			AlarmState:               record.AlarmState,
-			EvidenceState:            record.EvidenceState,
-			AlarmSN:                  record.AlarmSN,
-			AlarmAttempts:            record.AlarmAttempts,
-			AlarmLastError:           record.AlarmLastError,
-			AlarmNextRetryAtUnixNano: record.AlarmNextRetryAtUnixNano,
-			EvidenceError:            record.EvidenceError,
+			Key:                         record.Key,
+			Cursor:                      record.Cursor,
+			Event:                       record.Event,
+			AlarmState:                  record.AlarmState,
+			EvidenceState:               record.EvidenceState,
+			AlarmSN:                     record.AlarmSN,
+			AlarmAttempts:               record.AlarmAttempts,
+			AlarmLastError:              record.AlarmLastError,
+			AlarmNextRetryAtUnixNano:    record.AlarmNextRetryAtUnixNano,
+			EvidenceAttempts:            record.EvidenceAttempts,
+			EvidenceNextRetryAtUnixNano: record.EvidenceNextRetryAtUnixNano,
+			EvidenceError:               record.EvidenceError,
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -567,10 +583,19 @@ func validateEvent(deviceID string, event media.AnalyticsEvent) error {
 	return nil
 }
 
-// Enqueue durably records an event. alarmEnabled controls whether this phase
-// enters the Alarm sink; evidence remains independently disabled for now.
+// Enqueue durably records an event with the evidence sink disabled. It remains
+// as a compatibility wrapper for callers that do not configure exact evidence.
 func (s *Store) Enqueue(event media.AnalyticsEvent, cursor uint64,
 	alarmEnabled bool) (Record, bool, error) {
+	return s.EnqueueWithEvidence(event, cursor, alarmEnabled, false)
+}
+
+// EnqueueWithEvidence durably records an event and independently schedules an
+// exact-evidence upload for START events that carry an evidence_id. UPDATE and
+// END reuse the START image through the event contract and do not upload it a
+// second time.
+func (s *Store) EnqueueWithEvidence(event media.AnalyticsEvent, cursor uint64,
+	alarmEnabled bool, evidenceEnabled bool) (Record, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.file == nil {
@@ -607,13 +632,28 @@ func (s *Store) Enqueue(event media.AnalyticsEvent, cursor uint64,
 		alarmState = StatePending
 		alarmSN = s.allocateAlarmSNLocked()
 	}
+	evidenceState := StateDisabled
+	evidenceError := ""
+	if evidenceEnabled {
+		evidenceState = StateIgnored
+		switch {
+		case event.Phase != media.EventPhaseStart:
+			evidenceError = "only START events upload evidence"
+		case event.EvidenceID == "":
+			evidenceState = StateDead
+			evidenceError = "event has no evidence_id"
+		default:
+			evidenceState = StatePending
+		}
+	}
 	record := Record{
 		Key:           key,
 		Cursor:        cursor,
 		Event:         event,
 		AlarmState:    alarmState,
-		EvidenceState: StateDisabled,
+		EvidenceState: evidenceState,
 		AlarmSN:       alarmSN,
+		EvidenceError: evidenceError,
 	}
 	oldNext := s.nextAlarmSN
 	entry := journalEntry{
@@ -625,6 +665,7 @@ func (s *Store) Enqueue(event media.AnalyticsEvent, cursor uint64,
 		AlarmState:    record.AlarmState,
 		EvidenceState: record.EvidenceState,
 		AlarmSN:       record.AlarmSN,
+		EvidenceError: record.EvidenceError,
 		NextAlarmSN:   s.nextAlarmSN,
 	}
 	appendErr := s.appendLocked(entry)
@@ -718,7 +759,8 @@ func oldestTerminal(records map[string]Record) (Record, bool) {
 	var candidate Record
 	found := false
 	for _, record := range records {
-		if record.AlarmState == StatePending || record.EvidenceState == StatePending {
+		if record.AlarmState == StatePending || record.EvidenceState == StatePending ||
+			record.EvidenceState == StateStaging {
 			continue
 		}
 		if !found || record.Cursor < candidate.Cursor ||
@@ -823,6 +865,95 @@ func (s *Store) MarkAlarmAttempt(key string, cause error, terminal bool,
 	return record, nil
 }
 
+func (s *Store) MarkEvidenceSent(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[key]
+	if !ok {
+		return fmt.Errorf("unknown outbox key %q", key)
+	}
+	record.EvidenceState = StateSent
+	record.EvidenceError = ""
+	record.EvidenceNextRetryAtUnixNano = 0
+	if err := s.appendLocked(journalEntry{
+		Op:                          "evidence_state",
+		Key:                         key,
+		EvidenceState:               record.EvidenceState,
+		EvidenceAttempts:            record.EvidenceAttempts,
+		EvidenceNextRetryAtUnixNano: 0,
+	}); err != nil {
+		return err
+	}
+	s.records[key] = record
+	return nil
+}
+
+func (s *Store) MarkEvidenceAttempt(key string, cause error, terminal bool,
+	retryAt time.Time) (Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[key]
+	if !ok {
+		return Record{}, fmt.Errorf("unknown outbox key %q", key)
+	}
+	record.EvidenceAttempts++
+	record.EvidenceError = trimError(cause)
+	record.EvidenceNextRetryAtUnixNano = 0
+	if terminal {
+		record.EvidenceState = StateDead
+	} else {
+		record.EvidenceState = StatePending
+		if !retryAt.IsZero() {
+			record.EvidenceNextRetryAtUnixNano = retryAt.UnixNano()
+		}
+	}
+	if appendErr := s.appendLocked(journalEntry{
+		Op:                          "evidence_state",
+		Key:                         key,
+		EvidenceState:               record.EvidenceState,
+		EvidenceAttempts:            record.EvidenceAttempts,
+		EvidenceNextRetryAtUnixNano: record.EvidenceNextRetryAtUnixNano,
+		EvidenceError:               record.EvidenceError,
+	}); appendErr != nil {
+		return Record{}, appendErr
+	}
+	s.records[key] = record
+	return record, nil
+}
+
+// MarkEvidenceStagingFailure records a source-side staging failure without
+// making the record visible to the upload loop. The producer cursor remains
+// unacknowledged until staging succeeds or this bounded retry reaches dead.
+func (s *Store) MarkEvidenceStagingFailure(key string, cause error,
+	terminal bool) (Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[key]
+	if !ok {
+		return Record{}, fmt.Errorf("unknown outbox key %q", key)
+	}
+	record.EvidenceAttempts++
+	record.EvidenceError = trimError(cause)
+	record.EvidenceNextRetryAtUnixNano = 0
+	if terminal {
+		record.EvidenceState = StateDead
+	} else {
+		record.EvidenceState = StateStaging
+	}
+	if appendErr := s.appendLocked(journalEntry{
+		Op:                          "evidence_state",
+		Key:                         key,
+		EvidenceState:               record.EvidenceState,
+		EvidenceAttempts:            record.EvidenceAttempts,
+		EvidenceNextRetryAtUnixNano: 0,
+		EvidenceError:               record.EvidenceError,
+	}); appendErr != nil {
+		return Record{}, appendErr
+	}
+	s.records[key] = record
+	return record, nil
+}
+
 func (s *Store) MarkEvidenceState(key, state string, cause error) error {
 	if state == "" {
 		return errors.New("evidence state is required")
@@ -836,10 +967,12 @@ func (s *Store) MarkEvidenceState(key, state string, cause error) error {
 	record.EvidenceState = state
 	record.EvidenceError = trimError(cause)
 	if appendErr := s.appendLocked(journalEntry{
-		Op:            "evidence_state",
-		Key:           key,
-		EvidenceState: record.EvidenceState,
-		EvidenceError: record.EvidenceError,
+		Op:                          "evidence_state",
+		Key:                         key,
+		EvidenceState:               record.EvidenceState,
+		EvidenceAttempts:            record.EvidenceAttempts,
+		EvidenceNextRetryAtUnixNano: record.EvidenceNextRetryAtUnixNano,
+		EvidenceError:               record.EvidenceError,
 	}); appendErr != nil {
 		return appendErr
 	}
@@ -874,6 +1007,31 @@ func (s *Store) PendingAlarms() []Record {
 		return result[i].Cursor < result[j].Cursor
 	})
 	return result
+}
+
+func (s *Store) PendingEvidence() []Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]Record, 0)
+	for _, record := range s.records {
+		if record.EvidenceState == StatePending {
+			result = append(result, record)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Cursor == result[j].Cursor {
+			return result[i].Key < result[j].Key
+		}
+		return result[i].Cursor < result[j].Cursor
+	})
+	return result
+}
+
+func (s *Store) Lookup(key string) (Record, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[key]
+	return record, ok
 }
 
 func (s *Store) Records() []Record {

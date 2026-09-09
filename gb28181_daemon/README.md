@@ -2,7 +2,8 @@
 
 RV1126B IPC 的 GB28181 信令守护进程（Go）。SIP 注册、心跳、
 Catalog/DeviceInfo 应答、INVITE/BYE 会话管理和媒体 unix socket RPC 已接线；
-可选的人流事件链路通过长连接订阅、持久 outbox 和标准 Alarm MESSAGE 投递。
+可选的人流事件链路通过长连接订阅、持久 outbox 和标准 Alarm MESSAGE 投递；
+`exact_evidence` 模式另用独立 HTTP multipart 通道上传端侧 JPEG。
 
 ## 目录结构
 
@@ -59,6 +60,13 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -buildvcs=false -o bin/gb28181-da
   止并报告错误，不会静默确认。
 - `events.alarm_types`：按 `event_type` 覆盖默认 AlarmType（越线 `5`、入侵 `6`、
   人流统计 `9`）；重试采用带抖动的有界指数退避，重试时间也写入 outbox。
+- `events.evidence_enabled=true`：启用精确证据上传。daemon 会先校验
+	  `evidence_dir` 中的 JPEG/JSON SHA-256，并复制到 `evidence_outbox_dir` 后才 ACK
+	  media_engine；暂存目录受 `evidence_max_bytes` 限制，成功或终止失败后清理，
+	  Alarm 与 Evidence 使用独立重试状态。`evidence_url` 接收
+	  multipart 字段 `event_id`、`evidence_id`、`metadata`、`image`，请求带
+	  `Idempotency-Key` 和必需的 Bearer token。该接口需要 WVP 侧适配器，不能据此宣称
+  stock WVP 已展示精确图片。
 - 如果 media_engine 报告 `replay_gap`，daemon 会进入 fail-stop，等待人工处理日志
   缺口，不会把不完整历史当成连续事件。
 - `channels`：目录上报的通道列表，INVITE 只接受列表内的通道。
@@ -99,6 +107,7 @@ A.3.7，PTZCmd 字节 4 为 `8CH` 开 / `8DH` 关，字节 5 为开关编号）�
 - [x] DeviceControl（IO 测试桩）：辅助开关 PTZCmd 8CH/8DH 触发时打印到 stdout
 - [x] media_engine RPC 控制与事件订阅服务端（C/GStreamer）
 - [x] 人流事件持久接收、游标恢复、Alarm XML 构建和 SIP 重试 outbox
+- [x] exact evidence 主机链路：端侧证据校验、daemon 持久副本、独立 HTTP 上传和重试
 - [ ] 真实板端 RockIVA 长期稳定性与 stock WVP Alarm 互操作验收
 - [ ] 控制协议正式定稿（hello/版本协商、错误码表）
 - [ ] PTZ / 报警 / 抓图 / 对讲（真实 IO/GPIO 接入）

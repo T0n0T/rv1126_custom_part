@@ -127,9 +127,15 @@ snapshot_dir: /data/media_engine/snapshots
 分析事件需要客户端先调用 `media.subscribe_events`。服务端会先返回订阅状态，
 再按 `after_cursor` 重放事件，后续事件通过同一 `media.event` 通知发送；每条
 分析通知的 `params` 包含 `event: "analytics"`、持久化 `cursor` 和 `analytics`
-事件对象。客户端处理完成后调用 `media.ack_events` 保存本连接的确认进度；断线
+事件对象；exact evidence 模式下事件包含 `evidence_id`，对应
+`snapshot_dir/<evidence_id>.jpg` 和同名 JSON 元数据。客户端处理完成后调用
+`media.ack_events` 保存本连接的确认进度；断线
 重连时再次携带最后确认的 `after_cursor`。日志容量不足时优先保留 START/END，
 被淘汰的 cursor 会在订阅响应中体现为 `replay_gap: true`。
+
+JSON 元数据同时记录 `source_timebase`、`object_key`、JPEG SHA-256、
+`storage_state` 和 `delivery_state`。未绑定通道/流纪元的 JPEG 不会被当作 exact
+证据；未过期的已发布证据按保留租约保护，容量不足时报告降级而不静默删除。
 
 事件通知（无 id，尽力投递到当前已连接客户端）：
 

@@ -199,10 +199,12 @@ path remain downstream acceptance items.
 
 **Blocked by:** T3 — 常驻分析分支；T4 — 事件引擎。
 
-**Status:** in progress（事件日志、IPC 订阅桥和 daemon 持久接收已实现；证据缓存仍待开发）
+**Status:** in progress（主机侧 EvidenceCache、事件日志、IPC 订阅桥和 daemon 持久接收已实现；板端与 WVP 端到端门禁仍待补）
 
-- [ ] 触发帧优先选择精确证据，降级到近邻帧时记录差异并标记近似。
-- [ ] 图片发布原子化，证据元数据包含 `event_id`、`evidence_id`、帧 ID、PTS、校验和及保留状态。
+- [x] 触发帧优先选择精确证据，降级到近邻帧时记录差异并标记近似。
+- [x] 图片发布原子化，证据元数据包含 `event_id`、`evidence_id`、帧 ID、PTS、源
+      timebase、对象键、校验和、存储/投递状态；缓存支持重启恢复、过期清理，并在
+      未过期证据受保护时以容量降级替代静默淘汰。
 - [x] 事件先写入有界 JSONL 持久日志，再通过带 cursor 的 IPC 订阅发送；日志追加
       使用 `fsync`，启动时恢复并截断损坏尾部。
 - [x] `media.subscribe_events` 支持 `after_cursor` 重放，返回 `replay_gap`、首尾
@@ -212,8 +214,11 @@ path remain downstream acceptance items.
 - [x] daemon 持久化 ACK、断线恢复、幂等接收和 DeliveryOutbox 已实现；事件先写入
       daemon outbox 再 ACK media_engine，重启从 durable cursor 恢复，Alarm/Evidence
       sink 状态分离。
-- [ ] 证据缓存仍未实现，因此 T5 尚未完成精确证据和整链路验收；daemon outbox 已具备
-      版本校验、有界容量、原子压缩、损坏尾部截断和中间损坏 fail-stop。
+- [x] `exact_evidence` 已接入 GStreamer JPEG 分支（MPP JPEG 优先，软件 JPEG 兜底），
+      daemon 在 ACK 前校验并复制证据到自己的有界 outbox 目录；暂存失败保持 cursor
+      未确认，HTTP EvidenceSink 与 Alarm 独立重试、幂等键和永久失败状态已有主机测试。
+- [ ] 板端 JPEG 编码、真板资源/时延、WVP 适配器和端到端展示仍未验收；daemon outbox
+      仍具备版本校验、有界容量、原子压缩、损坏尾部截断和中间损坏 fail-stop。
 
 ### T6 — daemon Outbox 与标准 Alarm
 
@@ -221,12 +226,12 @@ path remain downstream acceptance items.
 
 **Blocked by:** T5 — 证据缓存与持久事件桥。
 
-**Status:** in progress（daemon 订阅、outbox、Alarm 构建和重试代码已实现；WVP/真板验收待补）
+**Status:** in progress（daemon 订阅、outbox、Alarm/Evidence 构建和独立重试代码已实现；WVP/真板验收待补）
 
 - [x] daemon 重启后从最后确认游标继续接收，重复事件按 `event_id/phase/event_seq`
       幂等处理；主机测试覆盖 ACK、重启恢复和重复事件。
 - [x] Outbox 分别记录 Alarm 和证据 sink 状态，成功 sink 不因另一 sink 失败而重发；
-      证据 sink 当前保持 disabled，待 T7 实现。
+      stock 模式保持 disabled，exact 模式进入独立 EvidenceSink。
 - [x] 标准 Alarm XML 包含必需字段，`SN`、事件序号、帧 ID 和 PTS 严格分离；Alarm
       序号独立分配并在 outbox 记录中保持重试稳定。
 - [x] Alarm XML 不嵌入 JPEG、Base64 或端侧本地路径；默认只投递 START。
@@ -241,12 +246,13 @@ path remain downstream acceptance items.
 
 **Blocked by:** T5 — 证据缓存与持久事件桥；T6 — daemon Outbox 与标准 Alarm。
 
-**Status:** blocked
+**Status:** in progress（主机实现与故障边界已完成；部署适配器和运行态验收待补）
 
-- [ ] 证据内容在确认前具有持久副本或有效保留租约。
-- [ ] HTTP 认证、校验和、幂等键、重试退避和永久失败状态可测试。
-- [ ] 图片和 Alarm 可任意顺序到达，证据失败不阻塞 Alarm 投递。
-- [ ] 默认 stock 模式不启用该 Sink，也不改变标准 Alarm 契约。
+- [x] 证据内容在确认前复制到 daemon 自有持久目录。
+- [x] HTTP Bearer 认证、SHA-256 校验、幂等键、重试退避和永久失败状态可测试。
+- [x] 图片和 Alarm 使用独立 sink 状态，证据失败不阻塞 Alarm 投递。
+- [x] 默认 stock 模式不启用该 Sink，也不改变标准 Alarm 契约。
+- [ ] WVP 侧接收适配器和真板运行态仍未验证。
 
 ### T8 — stock WVP 兼容验证
 

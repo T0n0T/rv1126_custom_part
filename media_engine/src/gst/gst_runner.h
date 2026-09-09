@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "analytics/evidence_cache.h"
 #include "analytics/observation.h"
 #include "config/config.h"
 #include "session/session.h"
@@ -38,6 +39,15 @@ int gst_runner_stop_live(GstRunner *r, const char *session_id, char *err,
                          size_t errsz);
 int gst_runner_snapshot(GstRunner *r, const char *channel_id,
                         const char *out_dir, char *err, size_t errsz);
+
+/* Associates an analytics observation with the encoded evidence branch. */
+void gst_runner_note_analytics_frame(GstRunner *r,
+						 const MeNormalizedObservation *observation);
+
+/* Captures exact_evidence for START or attaches a previously published record
+ * to later lifecycle phases. Returns 0 on success, 1 when unavailable. */
+int gst_runner_capture_evidence(GstRunner *r, MeAnalyticsEvent *event,
+						char *err, size_t errsz);
 
 void gst_runner_status(GstRunner *r, bool *running, int *fps, int *bitrate);
 

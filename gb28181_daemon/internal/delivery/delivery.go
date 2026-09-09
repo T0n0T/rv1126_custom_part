@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,25 +25,33 @@ type MessageSender interface {
 }
 
 type Config struct {
-	DeviceID      string
-	OutboxPath    string
-	MaxRecords    int
-	MaxBytes      int64
-	AlarmPriority int
-	AlarmMethod   int
-	AlarmTypes    map[string]int
-	SendUpdates   bool
-	SendEnds      bool
-	MaxAttempts   int
-	RetryBase     time.Duration
-	RetryMax      time.Duration
-	SendTimeout   time.Duration
+	DeviceID          string
+	OutboxPath        string
+	MaxRecords        int
+	MaxBytes          int64
+	AlarmPriority     int
+	AlarmMethod       int
+	AlarmTypes        map[string]int
+	SendUpdates       bool
+	SendEnds          bool
+	MaxAttempts       int
+	RetryBase         time.Duration
+	RetryMax          time.Duration
+	SendTimeout       time.Duration
+	EvidenceEnabled   bool
+	EvidenceDir       string
+	EvidenceOutboxDir string
+	EvidenceMaxBytes  int64
+	EvidenceURL       string
+	EvidenceToken     string
+	EvidenceUploader  EvidenceUploader
 }
 
 type Service struct {
 	cfg        Config
 	subscriber media.EventSubscriber
 	sender     MessageSender
+	evidence   EvidenceUploader
 	store      *outbox.Store
 	log        *slog.Logger
 }
@@ -81,6 +90,23 @@ func New(cfg Config, subscriber media.EventSubscriber, sender MessageSender,
 	if cfg.SendTimeout <= 0 {
 		cfg.SendTimeout = 5 * time.Second
 	}
+	if cfg.EvidenceEnabled && strings.TrimSpace(cfg.EvidenceDir) == "" {
+		return nil, errors.New("evidence directory is required when evidence is enabled")
+	}
+	if cfg.EvidenceEnabled && strings.TrimSpace(cfg.EvidenceOutboxDir) == "" {
+		cfg.EvidenceOutboxDir = filepath.Join(filepath.Dir(cfg.OutboxPath), "evidence")
+	}
+	if cfg.EvidenceEnabled && cfg.EvidenceMaxBytes <= 0 {
+		cfg.EvidenceMaxBytes = 64 << 20
+	}
+	evidence := cfg.EvidenceUploader
+	if cfg.EvidenceEnabled && evidence == nil {
+		var err error
+		evidence, err = NewHTTPEvidenceUploader(cfg.EvidenceURL, cfg.EvidenceToken, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
 	alarmTypes := gbxml.DefaultAlarmTypes()
 	for eventType, alarmType := range cfg.AlarmTypes {
 		alarmTypes[eventType] = alarmType
@@ -98,10 +124,17 @@ func New(cfg Config, subscriber media.EventSubscriber, sender MessageSender,
 		log.Warn("delivery outbox recovered a corrupt final JSONL record",
 			"path", cfg.OutboxPath)
 	}
+	if cfg.EvidenceEnabled {
+		if err := cleanupOrphanedEvidence(cfg.EvidenceOutboxDir, store.Records()); err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("clean evidence outbox: %w", err)
+		}
+	}
 	return &Service{
 		cfg:        cfg,
 		subscriber: subscriber,
 		sender:     sender,
+		evidence:   evidence,
 		store:      store,
 		log:        log,
 	}, nil
@@ -112,20 +145,28 @@ func New(cfg Config, subscriber media.EventSubscriber, sender MessageSender,
 func (s *Service) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	wake := make(chan struct{}, 1)
+	evidenceWake := make(chan struct{}, 1)
 	alarmDone := make(chan struct{})
+	evidenceDone := make(chan struct{})
 	go func() {
 		defer close(alarmDone)
 		s.alarmLoop(runCtx, wake)
 	}()
+	go func() {
+		defer close(evidenceDone)
+		s.evidenceLoop(runCtx, evidenceWake)
+	}()
 	defer func() {
 		cancel()
 		<-alarmDone
+		<-evidenceDone
 		if err := s.store.Close(); err != nil {
 			s.log.Error("close delivery outbox failed", "error", err)
 		}
 	}()
 
 	signal(wake)
+	signal(evidenceWake)
 	for {
 		afterCursor := s.store.LastAck()
 		err := s.subscriber.ConsumeEvents(runCtx, afterCursor,
@@ -141,7 +182,7 @@ func (s *Service) Run(ctx context.Context) error {
 					"latestCursor", info.LatestCursor)
 				return err
 			}, func(notification media.EventNotification) error {
-				return s.ingest(notification, wake)
+				return s.ingest(notification, wake, evidenceWake)
 			})
 		if runCtx.Err() != nil {
 			return nil
@@ -160,10 +201,27 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) ingest(notification media.EventNotification,
-	wake chan<- struct{}) error {
+	wakes ...chan<- struct{}) error {
 	alarmEnabled := s.alarmEnabled(notification.Event.Phase)
-	_, added, err := s.store.Enqueue(notification.Event, notification.Cursor,
-		alarmEnabled)
+	evidenceEnabled := s.evidence != nil
+	key := outbox.Key(s.cfg.DeviceID, notification.Event)
+	existing, exists := s.store.Lookup(key)
+	stageRequired := evidenceEnabled && notification.Event.Phase == media.EventPhaseStart &&
+		notification.Event.EvidenceID != "" &&
+		(!exists || (existing.EvidenceState != outbox.StateSent &&
+			existing.EvidenceState != outbox.StateDead))
+	stageErr := error(nil)
+	if stageRequired {
+		stageErr = stageEvidence(s.cfg.EvidenceDir, s.cfg.EvidenceOutboxDir,
+			notification.Event, s.cfg.EvidenceMaxBytes)
+		if stageErr != nil {
+			s.log.Warn("stage analytics evidence failed; Alarm remains independent",
+				"eventId", notification.Event.EventID,
+				"evidenceId", notification.Event.EvidenceID, "error", stageErr)
+		}
+	}
+	record, added, err := s.store.EnqueueWithEvidence(notification.Event,
+		notification.Cursor, alarmEnabled, evidenceEnabled)
 	if err != nil {
 		if errors.Is(err, outbox.ErrUpdateDropped) {
 			if ackErr := s.store.Ack(notification.Cursor); ackErr != nil {
@@ -176,11 +234,55 @@ func (s *Service) ingest(notification media.EventNotification,
 		}
 		return fmt.Errorf("persist event cursor %d: %w", notification.Cursor, err)
 	}
+	if stageRequired {
+		if stageErr == nil && !added &&
+			(record.EvidenceState == outbox.StateDead ||
+				record.EvidenceState == outbox.StateStaging ||
+				record.EvidenceState == outbox.StateIgnored) {
+			if err := s.store.MarkEvidenceState(record.Key, outbox.StatePending, nil); err != nil {
+				return fmt.Errorf("requeue staged evidence for cursor %d: %w",
+					notification.Cursor, err)
+			}
+		}
+	}
+	if stageErr != nil {
+		attempt := record.EvidenceAttempts + 1
+		terminal := attempt >= s.cfg.MaxAttempts
+		updated, markErr := s.store.MarkEvidenceStagingFailure(record.Key,
+			stageErr, terminal)
+		if markErr != nil {
+			return fmt.Errorf("persist evidence staging failure for cursor %d: %w",
+				notification.Cursor, markErr)
+		}
+		if added && alarmEnabled && len(wakes) > 0 {
+			// Alarm remains independently deliverable while the source event is
+			// replayed until the evidence is durably staged.
+			signal(wakes[0])
+		}
+		if terminal {
+			if err := s.store.Ack(notification.Cursor); err != nil {
+				return fmt.Errorf("persist terminal evidence ACK cursor %d: %w",
+					notification.Cursor, err)
+			}
+			s.log.Error("analytics evidence staging moved to dead state",
+				"key", updated.Key, "attempts", updated.EvidenceAttempts,
+				"error", stageErr)
+			return nil
+		}
+		return fmt.Errorf("stage analytics evidence for cursor %d: %w",
+			notification.Cursor, stageErr)
+	}
 	if err := s.store.Ack(notification.Cursor); err != nil {
 		return fmt.Errorf("persist event ACK cursor %d: %w", notification.Cursor, err)
 	}
 	if added && alarmEnabled {
-		signal(wake)
+		if len(wakes) > 0 {
+			signal(wakes[0])
+		}
+	}
+	if (added || stageErr == nil) && evidenceEnabled && notification.Event.Phase == media.EventPhaseStart &&
+		notification.Event.EvidenceID != "" && len(wakes) > 1 {
+		signal(wakes[1])
 	}
 	return nil
 }
@@ -213,6 +315,24 @@ func (s *Service) alarmLoop(ctx context.Context, wake <-chan struct{}) {
 	}
 }
 
+func (s *Service) evidenceLoop(ctx context.Context, wake <-chan struct{}) {
+	if s.evidence == nil {
+		return
+	}
+	ticker := time.NewTicker(s.cfg.RetryBase)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-wake:
+			s.deliverPendingEvidence(ctx)
+		case <-ticker.C:
+			s.deliverPendingEvidence(ctx)
+		}
+	}
+}
+
 func (s *Service) deliverPending(ctx context.Context) {
 	now := time.Now()
 	for _, record := range s.store.PendingAlarms() {
@@ -221,6 +341,20 @@ func (s *Service) deliverPending(ctx context.Context) {
 			continue
 		}
 		s.deliverOne(ctx, record)
+		if ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+func (s *Service) deliverPendingEvidence(ctx context.Context) {
+	now := time.Now()
+	for _, record := range s.store.PendingEvidence() {
+		if record.EvidenceNextRetryAtUnixNano > 0 &&
+			now.UnixNano() < record.EvidenceNextRetryAtUnixNano {
+			continue
+		}
+		s.deliverEvidenceOne(ctx, record)
 		if ctx.Err() != nil {
 			return
 		}
@@ -279,6 +413,52 @@ func (s *Service) deliverOne(ctx context.Context, record outbox.Record) {
 	s.log.Warn("analytics alarm delivery failed", "key", record.Key,
 		"attempts", updated.AlarmAttempts, "retryAt", updated.AlarmNextRetryAtUnixNano,
 		"error", err)
+}
+
+func (s *Service) deliverEvidenceOne(ctx context.Context, record outbox.Record) {
+	metadata, image, err := loadEvidence(s.cfg.EvidenceOutboxDir, record.Event)
+	if err == nil {
+		sendCtx, cancel := context.WithTimeout(ctx, s.cfg.SendTimeout)
+		err = s.evidence.Upload(sendCtx, record, metadata, image)
+		cancel()
+	}
+	if err == nil {
+		if markErr := s.store.MarkEvidenceSent(record.Key); markErr != nil {
+			s.log.Error("mark evidence sent failed", "key", record.Key, "error", markErr)
+			return
+		}
+		if cleanupErr := removeStagedEvidence(s.cfg.EvidenceOutboxDir, record.Event); cleanupErr != nil {
+			s.log.Error("remove delivered evidence failed", "key", record.Key,
+				"error", cleanupErr)
+		}
+		s.log.Info("analytics evidence delivered", "key", record.Key,
+			"cursor", record.Cursor, "evidenceId", record.Event.EvidenceID)
+		return
+	}
+	attempt := record.EvidenceAttempts + 1
+	terminal := attempt >= s.cfg.MaxAttempts
+	retryAt := time.Time{}
+	if !terminal {
+		retryAt = time.Now().Add(boundedBackoff(s.cfg.RetryBase, s.cfg.RetryMax, attempt))
+	}
+	updated, markErr := s.store.MarkEvidenceAttempt(record.Key, err, terminal, retryAt)
+	if markErr != nil {
+		s.log.Error("record evidence delivery failure failed", "key", record.Key,
+			"error", markErr)
+		return
+	}
+	if terminal {
+		if cleanupErr := removeStagedEvidence(s.cfg.EvidenceOutboxDir, record.Event); cleanupErr != nil {
+			s.log.Error("remove dead evidence failed", "key", record.Key,
+				"error", cleanupErr)
+		}
+		s.log.Error("analytics evidence moved to dead state", "key", record.Key,
+			"attempts", updated.EvidenceAttempts, "error", err)
+		return
+	}
+	s.log.Warn("analytics evidence delivery failed", "key", record.Key,
+		"attempts", updated.EvidenceAttempts,
+		"retryAt", updated.EvidenceNextRetryAtUnixNano, "error", err)
 }
 
 func (s *Service) alarmType(eventType string) int {

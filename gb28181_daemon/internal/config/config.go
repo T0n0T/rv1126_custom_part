@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -49,19 +51,25 @@ type StreamConfig struct {
 }
 
 type EventsConfig struct {
-	Enabled       bool           `json:"enabled"`
-	OutboxPath    string         `json:"outbox_path"`
-	MaxRecords    int            `json:"max_records"`
-	MaxBytes      int64          `json:"max_bytes"`
-	AlarmPriority int            `json:"alarm_priority"`
-	AlarmMethod   int            `json:"alarm_method"`
-	AlarmTypes    map[string]int `json:"alarm_types"`
-	SendUpdates   bool           `json:"send_updates"`
-	SendEnds      bool           `json:"send_ends"`
-	MaxAttempts   int            `json:"max_attempts"`
-	RetryBaseMS   int            `json:"retry_base_ms"`
-	RetryMaxMS    int            `json:"retry_max_ms"`
-	SendTimeoutMS int            `json:"send_timeout_ms"`
+	Enabled           bool           `json:"enabled"`
+	OutboxPath        string         `json:"outbox_path"`
+	MaxRecords        int            `json:"max_records"`
+	MaxBytes          int64          `json:"max_bytes"`
+	AlarmPriority     int            `json:"alarm_priority"`
+	AlarmMethod       int            `json:"alarm_method"`
+	AlarmTypes        map[string]int `json:"alarm_types"`
+	SendUpdates       bool           `json:"send_updates"`
+	SendEnds          bool           `json:"send_ends"`
+	MaxAttempts       int            `json:"max_attempts"`
+	RetryBaseMS       int            `json:"retry_base_ms"`
+	RetryMaxMS        int            `json:"retry_max_ms"`
+	SendTimeoutMS     int            `json:"send_timeout_ms"`
+	EvidenceEnabled   bool           `json:"evidence_enabled"`
+	EvidenceDir       string         `json:"evidence_dir"`
+	EvidenceOutboxDir string         `json:"evidence_outbox_dir"`
+	EvidenceMaxBytes  int64          `json:"evidence_max_bytes"`
+	EvidenceURL       string         `json:"evidence_url"`
+	EvidenceToken     string         `json:"evidence_token"`
 }
 
 type Channel struct {
@@ -122,10 +130,13 @@ func defaults() *Config {
 				"intrusion":  6,
 				"occupancy":  9,
 			},
-			MaxAttempts:   10,
-			RetryBaseMS:   1000,
-			RetryMaxMS:    300000,
-			SendTimeoutMS: 5000,
+			MaxAttempts:       10,
+			RetryBaseMS:       1000,
+			RetryMaxMS:        300000,
+			SendTimeoutMS:     5000,
+			EvidenceDir:       "/data/media_engine/snapshots",
+			EvidenceOutboxDir: "/data/gb28181_daemon/evidence",
+			EvidenceMaxBytes:  64 << 20,
 		},
 		Log: LogConfig{Level: "info"},
 	}
@@ -179,6 +190,9 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("media.mode must be \"none\" or \"rpc\", got %q", c.Media.Mode)
 	}
+	if c.Events.EvidenceEnabled && !c.Events.Enabled {
+		return errors.New("events.evidence_enabled requires events.enabled=true")
+	}
 	if c.Events.Enabled {
 		if c.Media.Mode != "rpc" {
 			return errors.New("events require media.mode=rpc")
@@ -201,6 +215,21 @@ func (c *Config) validate() error {
 		if c.Events.RetryBaseMS <= 0 || c.Events.RetryMaxMS < c.Events.RetryBaseMS ||
 			c.Events.SendTimeoutMS <= 0 {
 			return errors.New("events retry max and send timeouts are invalid")
+		}
+		if c.Events.EvidenceEnabled {
+			if strings.TrimSpace(c.Events.EvidenceDir) == "" {
+				return errors.New("events.evidence_dir is required when evidence is enabled")
+			}
+			if c.Events.EvidenceMaxBytes <= 0 {
+				return errors.New("events.evidence_max_bytes must be positive when evidence is enabled")
+			}
+			u, err := url.Parse(c.Events.EvidenceURL)
+			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+				return errors.New("events.evidence_url must be an http(s) URL when evidence is enabled")
+			}
+			if strings.TrimSpace(c.Events.EvidenceToken) == "" {
+				return errors.New("events.evidence_token is required when evidence is enabled")
+			}
 		}
 		for eventType, alarmType := range c.Events.AlarmTypes {
 			if eventType == "" || alarmType <= 0 || alarmType > 255 {

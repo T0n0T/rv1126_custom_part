@@ -110,8 +110,9 @@ does not replace T1/T3 board analysis acceptance.
 
 ## T5 证据与持久桥
 
-- [ ] 精确帧优先，近邻帧降级包含帧差和近似标记。
-- [ ] JPEG 原子发布、校验和、保留、过期和容量上限测试通过。
+- [x] 精确帧优先，近邻帧降级包含帧差和近似标记。
+- [x] JPEG 原子发布、校验和、保留、过期和容量上限测试通过；重启恢复和路径校验
+      也有主机测试。
 - [x] 事件先持久化再通知；有界 JSONL 日志带单调 cursor、fsync、启动恢复和损坏尾部
       截断。
 - [x] IPC `media.subscribe_events` 支持 `after_cursor` 重放并报告 `replay_gap`；
@@ -120,8 +121,11 @@ does not replace T1/T3 board analysis acceptance.
       损坏尾部、重放、缺口和边界保护。
 - [x] daemon 持久 ACK、断线恢复、幂等接收和 DeliveryOutbox 已实现；先落盘再 ACK，
       重启从 durable cursor 恢复，Alarm/Evidence sink 状态独立。
-- [ ] 证据缓存和 WVP/真板端到端门禁仍未完成；daemon outbox 压缩、容量和损坏恢复
-      主机测试已通过。
+- [x] exact 模式的 GStreamer JPEG 分支已接入，daemon 在 ACK 前校验并复制证据到
+      有界自有目录；暂存失败不确认 media cursor，Alarm/Evidence 独立重试、必需
+      Bearer 认证、幂等和失败状态有主机测试。
+- [ ] 板端 JPEG 编码/容量/时延、WVP 适配和真板端到端门禁仍未完成；daemon outbox
+      压缩、容量和损坏恢复主机测试已通过。
 
 实现证据：`make -C media_engine/tests clean all`、
 `make -C media_engine RK_APP_OUTPUT=/tmp/media_engine-app-output APP_STUB_DIR=/tmp/media_engine-app-stub PKG_BIN=/tmp/media_engine-wip-build -B all`。
@@ -129,7 +133,8 @@ does not replace T1/T3 board analysis acceptance.
 ## T6 daemon Outbox 与标准 Alarm
 
 - [x] daemon 重启后未确认事件可恢复，幂等键稳定。
-- [x] Alarm/Evidence sink 状态独立，成功 sink 不重复发送；Evidence 当前 disabled。
+- [x] Alarm/Evidence sink 状态独立，成功 sink 不重复发送；stock 模式 disabled，exact
+      模式使用独立 HTTP EvidenceSink。
 - [x] Alarm XML 主机测试覆盖转义、事件时间、类型映射和必需字段；运行态 WVP 仍待验收。
 - [x] 标准 Alarm 不包含 JPEG/Base64/本地路径，默认只发送 START。
 - [x] SIP 超时、拒绝、未注册和重试耗尽可观测；真实 SIP/WVP 运行态仍待补。
@@ -138,9 +143,10 @@ does not replace T1/T3 board analysis acceptance.
 
 ## T7 精确证据 Sink
 
-- [ ] 图片内容在确认前有持久副本或租约。
-- [ ] HTTP 认证、校验和、幂等、退避、重试和死信测试通过。
-- [ ] 图片与 Alarm 可乱序到达，证据失败不阻塞 Alarm。
+- [x] 图片内容在确认前复制到 daemon 自有持久目录。
+- [x] HTTP 认证、校验和、幂等、退避、重试和死信状态有主机测试。
+- [x] 图片与 Alarm 使用独立 sink 状态，证据失败不阻塞 Alarm。
+- [ ] WVP 侧接收适配器和真板运行态仍未验收。
 
 ## T8 stock WVP 兼容
 

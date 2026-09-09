@@ -41,7 +41,13 @@
     "max_attempts": 10,
     "retry_base_ms": 1000,
     "retry_max_ms": 300000,
-    "send_timeout_ms": 5000
+    "send_timeout_ms": 5000,
+    "evidence_enabled": false,
+    "evidence_dir": "/data/media_engine/snapshots",
+    "evidence_outbox_dir": "/data/gb28181_daemon/evidence",
+    "evidence_max_bytes": 67108864,
+    "evidence_url": "http://127.0.0.1:18080/api/v1/evidence",
+    "evidence_token": "change-me"
   },
   "channels": [
     {
