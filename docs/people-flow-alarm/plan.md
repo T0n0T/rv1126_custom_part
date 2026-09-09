@@ -1,10 +1,11 @@
 # 端侧人流检测与 GB28181 告警上送——实施计划
 
-状态：实施中（T1 探针已提供；CPU-NV12、隔离原生 DMA-BUF、一轮 60 帧有人场景及 GStreamer 单内存 DMA-BUF 子门禁证据已有，但因设备资源达到本轮上限暂时暂停更高占用板端复测；T2 已完成）
+状态：实施中（T1 探针和 T3 常驻分析代码已提供；CPU-NV12、隔离原生 DMA-BUF、一轮 60 帧有人场景及 GStreamer 单内存 DMA-BUF 子门禁证据已有，但因设备资源达到本轮上限暂时暂停更高占用板端复测；T2/T4 已完成，T5 第一阶段事件日志与 IPC 订阅桥已实现）
 上游规格：`docs/people-flow-alarm/spec.md`
 下游产物：`task.md`、`checklist.md`（另行创建）
-本阶段约束：仅在已解除依赖的 T2/T4 主机确定性边界内修改代码；T1 真板结果仍是
-进入常驻 RockIVA 分析分支的硬门禁。提交、推送、发布需另行授权。
+本阶段约束：T1 真板结果仍是 T3 生产验收和参数固化的硬门禁；当前允许先推进主机
+确定性实现与桥接协议，但不得把主机/候选板端证据写成发布通过。提交、推送、发布
+需另行授权。
 
 ## 1. 目标
 
@@ -150,8 +151,9 @@ B2/B3 生产分析分支；资源恢复后的最小入口固定使用 `/dev/vide
 当前已完成主机确定性实现：`event_engine.{h,c}` 以固定容量状态保存单路事件，
 使用 PTS 优先的单调内部时间线，保留采集墙上时间的缺失状态，并通过同步回调
 输出完整 `START/UPDATE/END`。越线规则事实可带责任 `track_id`，同一事件会聚合
-方向增量和责任轨迹；ROI 边界切换使用规则去抖时间确认。该实现尚未连接 RockIVA、
-证据缓存或 daemon，观察结果契约已递增到版本 2。
+方向增量和责任轨迹；ROI 边界切换使用规则去抖时间确认。当前已由
+`engine_analytics_observation` 接收 RockIVA 归一化观察结果，并由
+`engine_analytics_event` 写入持久事件日志；板端参数和长期稳定性仍待 T1/T3 门禁。
 
 #### B5 EvidenceCache
 
@@ -167,6 +169,12 @@ B2/B3 生产分析分支；资源恢复后的最小入口固定使用 `/dev/vide
 - 新增长连接订阅协议：`subscribe / ack / resume`，不复用短请求响应；
 - 断线重放未确认记录；队满保护 `START/END`；
 - 协议版本号与兼容策略；日志损坏有明确恢复路径与诊断计数。
+
+第一阶段已实现：`event_codec.{c,h}` 统一 IPC 与 JSONL 事件格式，
+`event_journal.{c,h}` 提供有界追加、`fsync`、启动恢复、损坏尾部截断、游标重放、
+缺口检测及 START/END 保护；`media.subscribe_events` 和 `media.ack_events` 已接入
+media_engine Unix socket。当前 ACK 只在连接生命周期内维护，daemon 持久化游标、
+证据缓存和 outbox 仍属于后续 C 阶段。
 
 #### B7 验证
 
@@ -289,5 +297,6 @@ B2/B3 生产分析分支；资源恢复后的最小入口固定使用 `/dev/vide
 
 1. 设备资源恢复后，在真实 RV1126B 的隔离 `/dev/video25` 上重复有人场景 T1 RockIVA
    probe，再补齐完整流 epoch、主编码连续性、点播并发和资源预算证据；
-2. 在不等待 T1 的前提下完成 T4 事件引擎主机确定性实现与测试；
-3. T1/T4 均通过后再进入 T3 常驻分析分支，并继续 T5/T6 的事件桥与 Alarm 投递。
+2. 在 T3 板端门禁之外继续完成事件日志的 daemon 订阅客户端、持久 ACK、DeliveryOutbox
+   和标准 GB28181 Alarm sink；真板验证仍只使用 `/dev/video25`，不得操作 `/dev/video24`；
+3. T1/T3/T5/T6 的主机与板端证据齐备后，再推进 WVP 兼容和发布验收。

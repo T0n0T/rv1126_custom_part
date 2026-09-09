@@ -168,7 +168,7 @@ static bool is_known_key(const char *key)
 	    "analytics_rule_id", "analytics_rule_type", "analytics_evidence_mode",
 	    "analytics_evidence_max_bytes", "analytics_evidence_retention_s",
 	    "analytics_evidence_jpeg_quality", "analytics_event_log_max_records",
-	    "analytics_event_log_max_bytes",
+	    "analytics_event_log_max_bytes", "analytics_event_log_path",
 	};
 	size_t i;
 
@@ -516,6 +516,11 @@ static int config_apply_document(EngineConfig *cfg, yaml_document_t *doc,
 			if (parse_u64_value(value, &cfg->analytics.event_log_max_bytes, key,
 			                    err, errsz) != 0)
 				return -1;
+		} else if (!strcmp(key, "analytics_event_log_path")) {
+			if (set_string(cfg->analytics.event_log_path,
+			               sizeof(cfg->analytics.event_log_path), value, key, path,
+			               (int)knode->start_mark.line + 1, err, errsz) != 0)
+				return -1;
 		} else {
 			me_log(ME_LOG_WARN, "config %s:%d: unknown key \"%s\" ignored",
 			       path, (int)knode->start_mark.line + 1, key);
@@ -604,6 +609,7 @@ static void print_usage(const char *prog)
 		"  --analytics-width <px> analysis width (board-validated)\n"
 		"  --analytics-height <px> analysis height (board-validated)\n"
 		"  --analytics-fps <fps> analysis sampling rate (board-validated)\n"
+		"  --analytics-event-log-path <file> durable analytics event log\n"
 		"  -h               show this help\n",
 	        prog, ME_CFG_DEFAULT_IQ_DIR, ME_CFG_DEFAULT_DEVICE,
 	        ME_CFG_DEFAULT_FORMAT, ME_CFG_DEFAULT_WIDTH, ME_CFG_DEFAULT_HEIGHT,
@@ -627,6 +633,7 @@ static const struct option long_options[] = {
 	{"analytics-width", required_argument, NULL, 1011},
 	{"analytics-height", required_argument, NULL, 1012},
 	{"analytics-fps", required_argument, NULL, 1013},
+	{"analytics-event-log-path", required_argument, NULL, 1014},
 	{"help", no_argument, NULL, 'h'},
 	{0, 0, 0, 0},
 };
@@ -829,6 +836,13 @@ int engine_config_apply_cli(EngineConfig *cfg, int argc, char **argv,
 		case 1013:
 			if (parse_int_value(optarg, &cfg->analytics.fps,
 			                    "analytics_fps", err, errsz) != 0)
+				return -1;
+			break;
+		case 1014:
+			if (set_string(cfg->analytics.event_log_path,
+			               sizeof(cfg->analytics.event_log_path), optarg,
+			               "analytics_event_log_path", "<command line>", 0, err,
+			               errsz) != 0)
 				return -1;
 			break;
 		case 'h':

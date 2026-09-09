@@ -28,11 +28,21 @@ event_engine_test: event_engine_test.c ../src/analytics/event_engine.c \
 		../src/analytics/config.c ../src/analytics/observation.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-run: session_mgr_test config_test observation_test event_engine_test
+event_journal_test: event_journal_test.c ../src/analytics/event_journal.c \
+		../src/analytics/event_codec.c ../src/analytics/event_engine.c \
+		../src/analytics/config.c ../src/analytics/observation.c \
+		../src/common/util.c ../third_party/cJSON/cJSON.c
+	$(CC) $(CFLAGS) $(PKG_CFLAGS) -I../third_party/cJSON -o $@ $^ \
+		$(PKG_LIBS) -lm
+
+run: session_mgr_test config_test observation_test event_engine_test \
+		event_journal_test
 	./session_mgr_test
 	./config_test
 	./observation_test
 	./event_engine_test
+	./event_journal_test
 
 clean:
-	rm -f session_mgr_test config_test observation_test event_engine_test
+	rm -f session_mgr_test config_test observation_test event_engine_test \
+		event_journal_test

@@ -22,11 +22,11 @@ static void ipc_event_sink(void *userdata, const char *event,
 	ipc_server_broadcast_event(server, event, session_id, message);
 }
 
-static void ipc_analytics_event_sink(void *userdata,
+static void ipc_analytics_event_sink(void *userdata, uint64_t cursor,
 								 const MeAnalyticsEvent *event)
 {
 	IpcServer *server = userdata;
-	ipc_server_broadcast_analytics_event(server, event);
+	ipc_server_broadcast_analytics_event(server, cursor, event);
 }
 
 static void setup_gst_environment(void)

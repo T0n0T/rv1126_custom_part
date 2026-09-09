@@ -1,6 +1,6 @@
 # 端侧人流检测与 GB28181 告警上送任务分解
 
-状态：T0/T2/T4 已完成；T1 已取得 CPU-NV12、隔离采集 DMA-BUF 生命周期、一轮 60 帧有人场景、一轮 CLS8 900 帧对比及 GStreamer 单内存 DMA-BUF 生命周期子证据，但 CLS8 对比出现 `sequence_errors=53` 和明显 ID 重建，且因设备资源达到本轮上限而暂停；T3 仍阻塞于 T1
+状态：T0/T2/T4 已完成；T1 已取得 CPU-NV12、隔离采集 DMA-BUF 生命周期、一轮 60 帧有人场景、一轮 CLS8 900 帧对比及 GStreamer 单内存 DMA-BUF 生命周期子证据，但 CLS8 对比出现 `sequence_errors=53` 和明显 ID 重建，且因设备资源达到本轮上限而暂停；T3 代码已落地但板端验收仍待补齐；T5 第一阶段已实现，证据缓存与 daemon 投递仍未开始
 上游规格：`docs/people-flow-alarm/spec.md`
 上游计划：`docs/people-flow-alarm/plan.md`
 本文件作用：记录经确认的 T0-T12 纵向任务、阻塞关系和验收边界
@@ -14,9 +14,9 @@
 | T0 | 基线与回滚开关 | 无 | completed |
 | T1 | 真板 RockIVA 探针 | T0 | in progress |
 | T2 | 观察结果与配置契约 | T0 | completed |
-| T3 | 常驻分析分支 | T1、T2 | blocked |
+| T3 | 常驻分析分支 | T1、T2 | in progress（代码已落地，板端验收待补） |
 | T4 | 事件引擎 | T2 | completed |
-| T5 | 证据缓存与持久事件桥 | T3、T4 | blocked |
+| T5 | 证据缓存与持久事件桥 | T3、T4 | in progress（第一阶段：事件日志与 IPC 订阅桥） |
 | T6 | daemon Outbox 与标准 Alarm | T5 | blocked |
 | T7 | 精确证据 Sink | T5、T6 | blocked |
 | T8 | stock WVP 兼容验证 | T6 | blocked |
@@ -155,12 +155,14 @@ UAF/泄漏、主路径 sequence 和编码连续性仍未验证。GStreamer runne
 
 **Blocked by:** T1 — 真板 RockIVA 探针；T2 — 观察结果与配置契约。
 
-**Status:** blocked
+**Status:** in progress（常驻分支与 RockIVA 代码已落地；生产板端门禁仍依赖 T1）
 
-- [ ] 采集启动时建立有界、最新帧优先的低分辨率分析分支。
-- [ ] 分析帧提交、丢帧、缩放和释放不阻塞编码/采集主路径。
-- [ ] RockIVA 回调输出符合 T2 契约，轨迹身份限定在通道和流纪元内。
-- [ ] RockIVA 故障、超时或队列满只造成分析降级并产生指标。
+- [x] 采集启动时建立有界、最新帧优先的低分辨率分析分支；分支使用
+      `queue leaky=downstream -> rgarotate -> videorate -> appsink`。
+- [x] 分析帧提交、丢帧、缩放和释放路径已接入 RockIVA runner，主视频分支保持独立。
+- [x] RockIVA 回调已转换为 T2 观察结果，轨迹身份限定在通道和流纪元内。
+- [ ] 真板仍需补充有人场景多轮稳定性、异步停止/UAF、主编码连续性和资源预算验收；
+      这些证据完成前不把 T3 标为发布通过。
 
 ### T4 — 事件引擎
 
@@ -177,10 +179,12 @@ UAF/泄漏、主路径 sequence 和编码连续性仍未验证。GStreamer runne
 
 实现证据：`media_engine/src/analytics/event_engine.{h,c}` 和
 `media_engine/tests/event_engine_test.c`。引擎只消费 T2 归一化观察结果；本地事件
-始终产生完整生命周期，`send_updates/send_end` 留给下游 Alarm sink 决定。
+始终产生完整生命周期，`send_updates/send_end` 留给下游 Alarm sink 决定。当前
+`media_engine` 已将 RockIVA 观察回调接入该引擎，但板端生产验收仍属于 T3 门禁。
 测试覆盖占用 ROI、越线方向、确认、去抖、消失宽限、冷却、重复/乱序帧、流纪元切换、
 进程重启收尾和配置重置，并验证越线责任轨迹和 ROI 边界迟滞。观察结果契约版本
-从 1 递增到 2 以承载可选责任 `track_id`。尚未接入 RockIVA、证据缓存或 daemon 投递。
+从 1 递增到 2 以承载可选责任 `track_id`。当前已接入 RockIVA 观察回调和事件日志；
+证据缓存与 daemon 投递仍属于 T5/T6 的后续验收范围。
 
 T4 review: Standards/Spec passed after lifecycle, latest-count, config-version,
 direction-fact, overflow, and epoch-order boundary tests. Direction facts are
@@ -195,12 +199,18 @@ path remain downstream acceptance items.
 
 **Blocked by:** T3 — 常驻分析分支；T4 — 事件引擎。
 
-**Status:** blocked
+**Status:** in progress（事件日志与 IPC 订阅桥已实现；证据缓存和 daemon 仍待开发）
 
 - [ ] 触发帧优先选择精确证据，降级到近邻帧时记录差异并标记近似。
 - [ ] 图片发布原子化，证据元数据包含 `event_id`、`evidence_id`、帧 ID、PTS、校验和及保留状态。
-- [ ] 事件先写入有界持久日志，再通过带游标的长连接发送。
-- [ ] ACK、resume、队满合并/丢弃和损坏恢复行为可由主机测试验证。
+- [x] 事件先写入有界 JSONL 持久日志，再通过带 cursor 的 IPC 订阅发送；日志追加
+      使用 `fsync`，启动时恢复并截断损坏尾部。
+- [x] `media.subscribe_events` 支持 `after_cursor` 重放，返回 `replay_gap`、首尾
+      cursor；`media.ack_events` 支持客户端确认进度。
+- [x] 队满时优先保护 START/END，UPDATE 可丢弃并统计；主机测试覆盖重启、损坏尾部、
+      cursor 重放、缺口和边界保护。
+- [ ] daemon 持久化 ACK、断线恢复、证据缓存和 DeliveryOutbox 仍未实现，因此 T5
+      尚未完成端到端投递验收。
 
 ### T6 — daemon Outbox 与标准 Alarm
 

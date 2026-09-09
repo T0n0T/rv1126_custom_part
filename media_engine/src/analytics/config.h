@@ -10,6 +10,7 @@
 #define ME_ANALYTICS_BACKEND_MAX 32U
 #define ME_ANALYTICS_MODEL_MAX 96U
 #define ME_ANALYTICS_EVIDENCE_MODE_MAX 24U
+#define ME_ANALYTICS_EVENT_LOG_PATH_MAX 256U
 
 #define ME_ANALYTICS_DEFAULT_CONFIRM_FRAMES 3U
 #define ME_ANALYTICS_DEFAULT_CONFIRM_MS 300U
@@ -56,6 +57,7 @@ typedef struct {
 	uint32_t evidence_jpeg_quality;
 	uint32_t event_log_max_records;
 	uint64_t event_log_max_bytes;
+	char event_log_path[ME_ANALYTICS_EVENT_LOG_PATH_MAX];
 } MeAnalyticsConfig;
 
 void me_analytics_config_defaults(MeAnalyticsConfig *config);

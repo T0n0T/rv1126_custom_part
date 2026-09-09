@@ -5,6 +5,7 @@
 #include <stddef.h>
 
 #include "aiq/aiq_ctrl.h"
+#include "analytics/event_journal.h"
 #include "analytics/event_engine.h"
 #include "common/me_errors.h"
 #include "config/config.h"
@@ -20,7 +21,7 @@ typedef struct {
 typedef void (*EngineEventCb)(void *userdata, const char *event,
                               const char *session_id, const char *message);
 
-typedef void (*EngineAnalyticsEventCb)(void *userdata,
+typedef void (*EngineAnalyticsEventCb)(void *userdata, uint64_t cursor,
 									 const MeAnalyticsEvent *event);
 
 typedef struct {
@@ -29,6 +30,7 @@ typedef struct {
 	GstRunner *runner;
 	SessionMgr *sessions;
 	MeEventEngine analytics;
+	MeEventJournal *event_journal;
 	bool analytics_initialized;
 	EngineEventCb event_cb;
 	void *event_userdata;

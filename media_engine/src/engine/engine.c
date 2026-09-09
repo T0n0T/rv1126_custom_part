@@ -9,6 +9,7 @@
 typedef struct {
 	Engine *engine;
 	MeAnalyticsEvent event;
+	uint64_t cursor;
 } AnalyticsEventDispatch;
 
 static int engine_backend_start(void *data, const SessionParams *p, char *err,
@@ -38,7 +39,8 @@ static gboolean deliver_analytics_event(gpointer userdata)
 	Engine *e = dispatch->engine;
 
 	if (e->analytics_event_cb)
-		e->analytics_event_cb(e->analytics_event_userdata, &dispatch->event);
+		e->analytics_event_cb(e->analytics_event_userdata, dispatch->cursor,
+							   &dispatch->event);
 	g_free(dispatch);
 	return G_SOURCE_REMOVE;
 }
@@ -50,12 +52,35 @@ static void engine_analytics_event(void *userdata, const MeAnalyticsEvent *event
 {
 	Engine *e = userdata;
 	AnalyticsEventDispatch *dispatch;
+	char err[128] = {0};
+	uint64_t cursor = 0;
+	int rc;
 
 	if (!e || !event)
 		return;
+	if (!e->event_journal) {
+		me_log(ME_LOG_WARN,
+		       "analytics event not delivered: durable event journal unavailable");
+		return;
+	}
+	rc = me_event_journal_append(e->event_journal, event, &cursor, err,
+							 sizeof(err));
+	if (rc > 0) {
+		me_log(ME_LOG_WARN, "analytics UPDATE dropped by event journal pressure");
+		return;
+	}
+	if (rc < 0) {
+		me_log(ME_LOG_ERROR, "analytics event journal append failed: %s", err);
+		return;
+	}
 	dispatch = g_new0(AnalyticsEventDispatch, 1);
+	if (!dispatch) {
+		me_log(ME_LOG_ERROR, "analytics event delivery allocation failed");
+		return;
+	}
 	dispatch->engine = e;
 	dispatch->event = *event;
+	dispatch->cursor = cursor;
 	g_main_context_invoke(NULL, deliver_analytics_event, dispatch);
 }
 
@@ -82,6 +107,19 @@ int engine_init(Engine *e, const EngineConfig *cfg, char *err, size_t errsz)
 	                         engine_analytics_event, e, err, errsz) != 0)
 		return -1;
 	e->analytics_initialized = true;
+	if (cfg->analytics.enabled) {
+		e->event_journal = me_event_journal_open(
+			cfg->analytics.event_log_path,
+			cfg->analytics.event_log_max_records,
+			cfg->analytics.event_log_max_bytes, err, errsz);
+		if (!e->event_journal) {
+			me_log(ME_LOG_ERROR,
+			       "analytics event journal unavailable; analytics delivery disabled: %s",
+			       err && err[0] ? err : "unknown error");
+			if (err && errsz > 0)
+				err[0] = '\0';
+		}
+	}
 
 	/* AIQ first: the sensor/ISP must be up before the capture pipeline. A
 	 * failure is not fatal to the control plane; start_live reports it. */
@@ -94,7 +132,9 @@ int engine_init(Engine *e, const EngineConfig *cfg, char *err, size_t errsz)
 	if (!e->runner) {
 		if (!err || !err[0])
 			me_set_err(err, errsz, "gst_runner allocation failed");
-		me_event_engine_deinit(&e->analytics);
+		(void)me_event_engine_deinit(&e->analytics, NULL, 0);
+		me_event_journal_close(e->event_journal);
+		e->event_journal = NULL;
 		e->analytics_initialized = false;
 		return -1;
 	}
@@ -108,7 +148,9 @@ int engine_init(Engine *e, const EngineConfig *cfg, char *err, size_t errsz)
 		me_set_err(err, errsz, "session manager allocation failed");
 		gst_runner_free(e->runner);
 		e->runner = NULL;
-		me_event_engine_deinit(&e->analytics);
+		(void)me_event_engine_deinit(&e->analytics, NULL, 0);
+		me_event_journal_close(e->event_journal);
+		e->event_journal = NULL;
 		e->analytics_initialized = false;
 		return -1;
 	}
@@ -117,7 +159,7 @@ int engine_init(Engine *e, const EngineConfig *cfg, char *err, size_t errsz)
 
 void engine_deinit(Engine *e)
 {
-	char err[128];
+	char err[128] = {0};
 
 	if (!e)
 		return;
@@ -128,9 +170,13 @@ void engine_deinit(Engine *e)
 		 * drains the queued delivery in main() while the IPC server is alive. */
 		(void)me_event_engine_close(&e->analytics,
 						   ME_EVENT_REASON_PROCESS_RESTART, err, sizeof(err));
-		me_event_engine_deinit(&e->analytics);
+		if (me_event_engine_deinit(&e->analytics, err, sizeof(err)) < 0)
+			me_log(ME_LOG_ERROR, "analytics engine shutdown incomplete: %s",
+			       err[0] ? err : "unknown error");
 		e->analytics_initialized = false;
 	}
+	me_event_journal_close(e->event_journal);
+	e->event_journal = NULL;
 	aiq_ctrl_stop(&e->aiq);
 }
 

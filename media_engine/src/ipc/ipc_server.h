@@ -28,8 +28,9 @@ void ipc_server_deinit(IpcServer *s);
 void ipc_server_broadcast_event(IpcServer *s, const char *event,
                                 const char *session_id, const char *message);
 
-/* Structured people-flow event notification on the same media.event channel. */
-void ipc_server_broadcast_analytics_event(IpcServer *s,
-                                           const MeAnalyticsEvent *event);
+/* Structured people-flow event notification on the same media.event channel.
+ * Only clients that called media.subscribe_events receive these records. */
+void ipc_server_broadcast_analytics_event(IpcServer *s, uint64_t cursor,
+										   const MeAnalyticsEvent *event);
 
 #endif /* ME_IPC_SERVER_H */

@@ -88,10 +88,14 @@ CPU-NV12 探针、隔离 V4L2 DMA-BUF 生命周期与停止/重启结果、PFP/C
 
 ## T3 常驻分析分支
 
-- [ ] 采集启动即建立分析分支，不依赖 INVITE/点播。
-- [ ] 分析队列有界且采用最新帧策略，丢帧计数可观测。
-- [ ] 推理异常、超时、队列满时主视频仍持续输出。
-- [ ] 输出观察结果携带通道、流纪元、帧 ID、PTS 和后端版本。
+- [x] 采集启动即建立分析分支，不依赖 INVITE/点播；代码路径已接入
+      `v4l2src -> tee -> queue -> rgarotate -> videorate -> appsink`。
+- [x] 分析队列有界且采用最新帧策略，RockIVA runner 记录拒绝/未完成帧状态并释放
+      DMA-BUF 对应的 GstBuffer。
+- [x] 推理异常、超时、队列满时主视频仍使用独立分支；分析初始化失败回退为视频-only。
+- [x] 输出观察结果携带通道、流纪元、帧 ID、PTS 和后端版本。
+- [ ] 真板生产门禁仍未完成：多人多轮稳定性、异步停止/UAF、主编码连续性、点播并发
+      和资源预算仍待补证；因此 T3 仍不是发布通过。
 
 ## T4 事件引擎
 
@@ -108,8 +112,17 @@ does not replace T1/T3 board analysis acceptance.
 
 - [ ] 精确帧优先，近邻帧降级包含帧差和近似标记。
 - [ ] JPEG 原子发布、校验和、保留、过期和容量上限测试通过。
-- [ ] 事件先持久化再通知，游标、ACK、resume 和断线重放通过。
-- [ ] 队满优先保护 START/END，并统计 UPDATE 合并/丢弃。
+- [x] 事件先持久化再通知；有界 JSONL 日志带单调 cursor、fsync、启动恢复和损坏尾部
+      截断。
+- [x] IPC `media.subscribe_events` 支持 `after_cursor` 重放并报告 `replay_gap`；
+      `media.ack_events` 可确认当前连接的消费进度。
+- [x] 队满优先保护 START/END，并统计 UPDATE 丢弃；`event_journal_test` 覆盖重启、
+      损坏尾部、重放、缺口和边界保护。
+- [ ] daemon 持久 ACK、断线恢复、证据缓存和 DeliveryOutbox 尚未实现，T5 端到端门禁
+      保持未完成。
+
+实现证据：`make -C media_engine/tests clean all`、
+`make -C media_engine RK_APP_OUTPUT=/tmp/media_engine-app-output APP_STUB_DIR=/tmp/media_engine-app-stub PKG_BIN=/tmp/media_engine-wip-build -B all`。
 
 ## T6 daemon Outbox 与标准 Alarm
 

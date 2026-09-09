@@ -1,5 +1,7 @@
 #include "ipc/ipc_server.h"
 
+#include "analytics/event_codec.h"
+#include "analytics/event_journal.h"
 #include "cJSON.h"
 #include "common/util.h"
 
@@ -32,6 +34,8 @@ struct IpcClient {
 	GByteArray *in;
 	GQueue *out; /* pending strings, written when G_IO_OUT fires */
 	bool alive;
+	bool analytics_subscribed;
+	uint64_t analytics_ack_cursor;
 	IpcClientSource *source;
 };
 
@@ -316,6 +320,33 @@ static bool json_int(cJSON *params, const char *key, int *out)
 	return true;
 }
 
+static bool json_u64(cJSON *params, const char *key, uint64_t *out)
+{
+	cJSON *v = cJSON_GetObjectItemCaseSensitive(params, key);
+	double d;
+	char *end = NULL;
+	unsigned long long parsed;
+
+	if (!v || !out)
+		return false;
+	if (cJSON_IsNumber(v)) {
+		d = v->valuedouble;
+		if (d < 0 || d != floor(d) || d > 9007199254740991.0)
+			return false;
+		*out = (uint64_t)d;
+		return true;
+	}
+	if (!cJSON_IsString(v) || !v->valuestring || !v->valuestring[0] ||
+	    v->valuestring[0] < '0' || v->valuestring[0] > '9')
+		return false;
+	errno = 0;
+	parsed = strtoull(v->valuestring, &end, 10);
+	if (errno || !end || *end != '\0')
+		return false;
+	*out = (uint64_t)parsed;
+	return true;
+}
+
 static void ipc_send_result(IpcServer *s, IpcClient *c, uint64_t id,
                             cJSON *result)
 {
@@ -511,6 +542,131 @@ static bool ipc_handle_get_status(IpcServer *s, IpcClient *c, uint64_t id)
 	return c->alive;
 }
 
+static bool ipc_send_analytics_record(IpcServer *s, IpcClient *c,
+						      uint64_t cursor,
+						      const MeAnalyticsEvent *event)
+{
+	cJSON *params = NULL;
+	cJSON *notif = NULL;
+	cJSON *analytics = NULL;
+	char *text = NULL;
+	gchar *line = NULL;
+	bool sent = false;
+
+	if (!s || !c || !event || cursor == 0)
+		return false;
+	params = cJSON_CreateObject();
+	notif = cJSON_CreateObject();
+	analytics = me_analytics_event_to_json(event);
+	if (!params || !notif || !analytics)
+		goto cleanup;
+	cJSON_AddStringToObject(params, "event", "analytics");
+	cJSON_AddNumberToObject(params, "cursor", (double)cursor);
+	cJSON_AddItemToObject(params, "analytics", analytics);
+	analytics = NULL;
+	cJSON_AddNumberToObject(notif, "v", 1);
+	cJSON_AddStringToObject(notif, "method", "media.event");
+	cJSON_AddItemToObject(notif, "params", params);
+	params = NULL;
+	text = cJSON_PrintUnformatted(notif);
+	if (!text)
+		goto cleanup;
+	line = g_strdup_printf("%s\n", text);
+	if (!line)
+		goto cleanup;
+	sent = ipc_client_send(s, c, line);
+
+cleanup:
+	cJSON_free(text);
+	g_free(line);
+	cJSON_Delete(analytics);
+	cJSON_Delete(params);
+	cJSON_Delete(notif);
+	return sent;
+}
+
+static bool ipc_handle_subscribe_events(IpcServer *s, IpcClient *c,
+						uint64_t id, cJSON *params)
+{
+	GPtrArray *records = NULL;
+	MeEventJournalRecord *record;
+	cJSON *result;
+	uint64_t after_cursor = 0;
+	uint64_t oldest_cursor = 0;
+	uint64_t latest_cursor = 0;
+	bool replay_gap = false;
+	guint i;
+
+	if (!s->engine || !s->engine->event_journal)
+		return ipc_bad_params(s, c, id,
+						      "subscribe_events: event journal unavailable");
+	if (params && !cJSON_IsObject(params))
+		return ipc_bad_params(s, c, id,
+						      "subscribe_events: params must be an object");
+	if (params && cJSON_GetObjectItemCaseSensitive(params, "after_cursor") &&
+		    !json_u64(params, "after_cursor", &after_cursor))
+		return ipc_bad_params(s, c, id,
+						      "subscribe_events: after_cursor must be uint64");
+
+	records = me_event_journal_snapshot_after(
+		s->engine->event_journal, after_cursor, &replay_gap, &oldest_cursor,
+		&latest_cursor);
+	if (!records)
+		return ipc_bad_params(s, c, id,
+						      "subscribe_events: event journal snapshot failed");
+	c->analytics_subscribed = true;
+	c->analytics_ack_cursor = after_cursor;
+	result = cJSON_CreateObject();
+	if (!result) {
+		g_ptr_array_free(records, TRUE);
+		return c->alive;
+	}
+	cJSON_AddBoolToObject(result, "subscribed", TRUE);
+	cJSON_AddBoolToObject(result, "replay_gap", replay_gap);
+	cJSON_AddNumberToObject(result, "oldest_cursor", (double)oldest_cursor);
+	cJSON_AddNumberToObject(result, "latest_cursor", (double)latest_cursor);
+	ipc_send_result(s, c, id, result);
+	if (!c->alive)
+		goto out;
+	for (i = 0; i < records->len; i++) {
+		record = g_ptr_array_index(records, i);
+		if (!ipc_send_analytics_record(s, c, record->cursor, &record->event))
+			break;
+	}
+
+out:
+	g_ptr_array_free(records, TRUE);
+	return c->alive;
+}
+
+static bool ipc_handle_ack_events(IpcServer *s, IpcClient *c, uint64_t id,
+						  cJSON *params)
+{
+	cJSON *result;
+	uint64_t cursor;
+	uint64_t latest;
+
+	if (!c->analytics_subscribed)
+		return ipc_bad_params(s, c, id,
+						      "ack_events: client is not subscribed");
+	if (!cJSON_IsObject(params) || !json_u64(params, "cursor", &cursor))
+		return ipc_bad_params(s, c, id,
+						      "ack_events: cursor must be uint64");
+	latest = me_event_journal_latest_cursor(s->engine->event_journal);
+	if (cursor > latest)
+		return ipc_bad_params(s, c, id,
+						      "ack_events: cursor is beyond journal tail");
+	if (cursor > c->analytics_ack_cursor)
+		c->analytics_ack_cursor = cursor;
+	result = cJSON_CreateObject();
+	if (!result)
+		return c->alive;
+	cJSON_AddNumberToObject(result, "acked_cursor",
+	                        (double)c->analytics_ack_cursor);
+	ipc_send_result(s, c, id, result);
+	return c->alive;
+}
+
 static bool ipc_handle_line(IpcServer *s, IpcClient *c, const char *line,
                             size_t len)
 {
@@ -570,6 +726,12 @@ static bool ipc_handle_line(IpcServer *s, IpcClient *c, const char *line,
 			goto out;
 	} else if (!strcmp(method_name, "media.get_status")) {
 		if (!ipc_handle_get_status(s, c, id))
+			goto out;
+	} else if (!strcmp(method_name, "media.subscribe_events")) {
+		if (!ipc_handle_subscribe_events(s, c, id, params))
+			goto out;
+	} else if (!strcmp(method_name, "media.ack_events")) {
+		if (!ipc_handle_ack_events(s, c, id, params))
 			goto out;
 	} else {
 		char msg[128];
@@ -726,106 +888,21 @@ void ipc_server_broadcast_event(IpcServer *s, const char *event,
 	g_free(line);
 }
 
-void ipc_server_broadcast_analytics_event(IpcServer *s,
-									 const MeAnalyticsEvent *event)
+void ipc_server_broadcast_analytics_event(IpcServer *s, uint64_t cursor,
+									   const MeAnalyticsEvent *event)
 {
-	cJSON *params = NULL;
-	cJSON *notif = NULL;
-	cJSON *analytics = NULL;
-	cJSON *timebase = NULL;
-	cJSON *track_ids = NULL;
-	char *text;
-	size_t len;
-	gchar *line;
 	GSList *it;
-	uint32_t i;
 
-	if (!s || !event)
+	if (!s || !event || cursor == 0)
 		return;
-	params = cJSON_CreateObject();
-	notif = cJSON_CreateObject();
-	analytics = cJSON_CreateObject();
-	timebase = cJSON_CreateObject();
-	track_ids = cJSON_CreateArray();
-	if (!params || !notif || !analytics || !timebase || !track_ids)
-		goto cleanup;
-
-	cJSON_AddStringToObject(params, "event", "analytics");
-	cJSON_AddNumberToObject(analytics, "contract_version",
-	                        event->contract_version);
-	cJSON_AddStringToObject(analytics, "event_id", event->event_id);
-	cJSON_AddStringToObject(analytics, "channel_id", event->channel_id);
-	cJSON_AddNumberToObject(analytics, "stream_epoch",
-	                        (double)event->stream_epoch);
-	cJSON_AddStringToObject(analytics, "event_type",
-	                        me_rule_type_name(event->event_type));
-	cJSON_AddStringToObject(analytics, "rule_id", event->rule_id);
-	cJSON_AddStringToObject(analytics, "phase",
-	                        me_event_phase_name(event->phase));
-	cJSON_AddNumberToObject(analytics, "event_seq", (double)event->event_seq);
-	cJSON_AddStringToObject(analytics, "reason",
-	                        me_event_reason_name(event->reason));
-	cJSON_AddNumberToObject(analytics, "event_time_us",
-	                        (double)event->event_time_us);
-	cJSON_AddStringToObject(analytics, "clock_state",
-	                        me_clock_state_name(event->clock_state));
-	cJSON_AddBoolToObject(analytics, "source_pts_valid",
-	                      event->source_pts_valid);
-	cJSON_AddNumberToObject(analytics, "source_pts",
-	                        (double)event->source_pts);
-	cJSON_AddNumberToObject(timebase, "num", event->source_timebase.num);
-	cJSON_AddNumberToObject(timebase, "den", event->source_timebase.den);
-	cJSON_AddItemToObject(analytics, "source_timebase", timebase);
-	timebase = NULL;
-	cJSON_AddNumberToObject(analytics, "frame_id", (double)event->frame_id);
-	cJSON_AddNumberToObject(analytics, "person_count", event->person_count);
-	cJSON_AddNumberToObject(analytics, "delta_in", event->delta_in);
-	cJSON_AddNumberToObject(analytics, "delta_out", event->delta_out);
-	cJSON_AddNumberToObject(analytics, "config_version",
-	                        (double)event->config_version);
-	cJSON_AddStringToObject(analytics, "evidence_id", event->evidence_id);
-	cJSON_AddNumberToObject(analytics, "responsible_track_count",
-	                        event->responsible_track_count);
-	for (i = 0; i < event->responsible_track_count &&
-	            i < ME_ANALYTICS_EVENT_MAX_TRACKS; i++)
-		cJSON_AddItemToArray(track_ids,
-		                    cJSON_CreateNumber(
-		                        (double)event->responsible_track_ids[i]));
-	cJSON_AddItemToObject(analytics, "responsible_track_ids", track_ids);
-	track_ids = NULL;
-	cJSON_AddItemToObject(params, "analytics", analytics);
-	analytics = NULL;
-	cJSON_AddNumberToObject(notif, "v", 1);
-	cJSON_AddStringToObject(notif, "method", "media.event");
-	cJSON_AddItemToObject(notif, "params", params);
-	params = NULL;
-
-	text = cJSON_PrintUnformatted(notif);
-	if (!text)
-		goto cleanup;
-	len = strlen(text);
-	line = g_malloc(len + 2);
-	memcpy(line, text, len);
-	line[len] = '\n';
-	line[len + 1] = '\0';
-	cJSON_free(text);
-	for (it = s->clients; it; it = it->next) {
+	for (it = s->clients; it;) {
+		GSList *next = it->next;
 		IpcClient *client = it->data;
-		if (!ipc_client_send(s, client, line))
+		int fd = client->fd;
+		if (client->analytics_subscribed &&
+		    !ipc_send_analytics_record(s, client, cursor, event))
 			me_log(ME_LOG_WARN, "ipc: analytics event dropped for fd=%d",
-			       client->fd);
+			       fd);
+		it = next;
 	}
-	g_free(line);
-
-cleanup:
-	if (track_ids)
-		cJSON_Delete(track_ids);
-	if (timebase)
-		cJSON_Delete(timebase);
-	if (analytics)
-		cJSON_Delete(analytics);
-	if (params)
-		cJSON_Delete(params);
-	if (notif)
-		cJSON_Delete(notif);
 }

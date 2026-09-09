@@ -118,9 +118,18 @@ snapshot_dir: /data/media_engine/snapshots
 | `media.stop_live` | session_id | `{"ok":true}` |
 | `media.snapshot` | channel_id | `{"ok":true}` |
 | `media.get_status` | - | `{"running":bool,"fps":int,"bitrate":int}` |
+| `media.subscribe_events` | optional `after_cursor` | `subscribed/replay_gap/oldest_cursor/latest_cursor` |
+| `media.ack_events` | `cursor` | `acked_cursor` |
 
 错误码：`-32600` 格式/未知方法、`-32000` 媒体忙或媒体错误、`-32001` 会话不存在、
 `-32002` 参数非法。`ssrc` 按十进制 uint32 解析（对应 SIP SDP 的 `y=` 值）。
+
+分析事件需要客户端先调用 `media.subscribe_events`。服务端会先返回订阅状态，
+再按 `after_cursor` 重放事件，后续事件通过同一 `media.event` 通知发送；每条
+分析通知的 `params` 包含 `event: "analytics"`、持久化 `cursor` 和 `analytics`
+事件对象。客户端处理完成后调用 `media.ack_events` 保存本连接的确认进度；断线
+重连时再次携带最后确认的 `after_cursor`。日志容量不足时优先保留 START/END，
+被淘汰的 cursor 会在订阅响应中体现为 `replay_gap: true`。
 
 事件通知（无 id，尽力投递到当前已连接客户端）：
 

@@ -68,3 +68,4 @@ analytics_evidence_retention_s: 259200
 analytics_evidence_jpeg_quality: 85
 analytics_event_log_max_records: 4096
 analytics_event_log_max_bytes: 67108864
+analytics_event_log_path: /data/media_engine/analytics-events.jsonl

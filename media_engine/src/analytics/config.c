@@ -55,6 +55,8 @@ void me_analytics_config_defaults(MeAnalyticsConfig *config)
 	config->evidence_jpeg_quality = ME_ANALYTICS_DEFAULT_EVIDENCE_JPEG_QUALITY;
 	config->event_log_max_records = ME_ANALYTICS_DEFAULT_EVENT_LOG_MAX_RECORDS;
 	config->event_log_max_bytes = ME_ANALYTICS_DEFAULT_EVENT_LOG_MAX_BYTES;
+	snprintf(config->event_log_path, sizeof(config->event_log_path),
+			 "/data/media_engine/analytics-events.jsonl");
 }
 
 int me_analytics_config_validate(const MeAnalyticsConfig *config, char *err,
@@ -136,6 +138,11 @@ int me_analytics_config_validate(const MeAnalyticsConfig *config, char *err,
 	    config->event_log_max_records == 0 || config->event_log_max_bytes == 0) {
 		analytics_config_set_err(err, errsz,
 					 "analytics evidence and event log limits are invalid");
+		return -1;
+	}
+	if (!bounded_string(config->event_log_path, sizeof(config->event_log_path))) {
+		analytics_config_set_err(err, errsz,
+					 "analytics event log path is missing or overlong");
 		return -1;
 	}
 	if (config->enabled && !bounded_string(config->model, sizeof(config->model))) {

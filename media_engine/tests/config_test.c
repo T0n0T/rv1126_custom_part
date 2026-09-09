@@ -92,6 +92,9 @@ int main(void)
 	          cfg.analytics.height == 0 && cfg.analytics.fps == 0 &&
 	          cfg.analytics.model[0] == '\0',
 	      "analytics defaults stay disabled and unresolved");
+	CHECK(strcmp(cfg.analytics.event_log_path,
+	             "/data/media_engine/analytics-events.jsonl") == 0,
+	      "analytics event log path has a safe default");
 	rc = load_content(
 	    "analytics_enabled: on\n"
 	    "analytics_backend: rockiva\n"
@@ -117,7 +120,8 @@ int main(void)
 	    "analytics_evidence_retention_s: 259200\n"
 	    "analytics_evidence_jpeg_quality: 85\n"
 	    "analytics_event_log_max_records: 4096\n"
-	    "analytics_event_log_max_bytes: 67108864\n",
+	    "analytics_event_log_max_bytes: 67108864\n"
+	    "analytics_event_log_path: /tmp/analytics-events.jsonl\n",
 	    &cfg, err, sizeof(err));
 	CHECK(rc == 0, "complete analytics config loads");
 	CHECK(cfg.analytics.enabled && cfg.analytics.width == 640 &&
@@ -131,6 +135,8 @@ int main(void)
 	CHECK(cfg.analytics.rule_type == ME_RULE_TYPE_LINE_CROSS &&
 	          strcmp(cfg.analytics.evidence_mode, "exact_evidence") == 0,
 	      "analytics enum and evidence mode parsed");
+	CHECK(strcmp(cfg.analytics.event_log_path, "/tmp/analytics-events.jsonl") == 0,
+	      "analytics event log path parsed");
 
 	rc = load_content("analytics_enabled: true\nanalytics_model: pfp\n",
 	                   &cfg, err, sizeof(err));
