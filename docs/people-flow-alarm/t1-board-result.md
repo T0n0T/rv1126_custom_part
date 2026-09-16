@@ -340,6 +340,38 @@ unmatched/duplicate/invalid 和 `channel_mismatches` 均为 `0`，`DETECT_Releas
 `media_engine` 分支、完整流纪元、主编码并发或事件引擎投递。这里的 `person` 和
 `tracking` 是跨帧观察次数，不是唯一人数或进出流量。
 
+## 2026-09-16 GStreamer MP4->RockIVA 显示复测
+
+在不启动 `media_engine`、`gb28181_daemon` 或 WVP 的状态下，重新将同一
+`/tmp/me/test1.mp4` 送入隔离探针。探针仍只使用板端解码和显示资源，不打开
+`/dev/video25`；`/dev/video24` 未打开、停止或重配。板端 DRM 只读状态显示
+`card0-DSI-1=connected`，`kmssink` 使用 connector `97`、plane `75`。
+
+运行参数为 PFP、`640x640` 分析尺寸、`FPS=10`、30 帧、`coreMask=0x0`、
+`MIN_PERSON=1`、`MIN_TRACKING=1`、显示开启。实际管线为：
+
+```text
+filesrc ! qtdemux ! h264parse ! mppvideodec(dma-feature=true) ! tee
+  -> videoconvert ! videoscale ! videorate ! NV12 640x640 ! appsink
+  -> rgarotate(rotation=0,out=480x800) ! kmssink(connector=97,plane=75)
+```
+
+| 项目 | 结果 |
+| --- | --- |
+| 直接退出码 | `0` |
+| samples/pushed/detected/released | `30/30/30/30` |
+| person/tracking observations | `143/83` |
+| ownership / SDK cleanup errors | `0`；`DETECT_Release=0`、`ROCKIVA_Release=0` |
+| pipeline state | `PLAYING -> NULL` |
+| 日志 SHA-256 | `13f8cfd5e217530616334f1b26ceb47ca7c6d8a70a490b82eeb47024e36cb1d7` |
+
+这次复测再次证明板端 `mppvideodec -> RockIVA -> rgarotate -> kmssink` 候选链路可
+完成，并有 `FIRST/TRACKING/LOST/DISAPPEAR` 状态输出。没有取得物理屏幕像素或人工
+目视截图，因此不能把 KMS 管线成功等同于屏幕像素验收。日志仍有 MPP stride/size
+mismatch 警告和 RGA legacy API 警告；本次未导致失败，生产分支仍需单独处理。
+该结果是 MP4 测试源证据，不解除 T1 的真实采集 DMA-BUF、流 epoch、主编码并发和
+长期稳定性门禁。
+
 ## 当前判定
 
 - PFP 是下一阶段的暂定候选：CPU-NV12 片段、`test1.mp4` 人群压力样本和一轮 60 帧

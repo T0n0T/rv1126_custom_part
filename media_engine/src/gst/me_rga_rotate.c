@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "gst/me_rga_rotate.h"
 
 #include <gst/allocators/gstdmabuf.h>
