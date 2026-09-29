@@ -42,6 +42,10 @@ type stopLiveParams struct {
 	SessionID string `json:"session_id"`
 }
 
+type keepaliveLiveParams struct {
+	SessionID string `json:"session_id"`
+}
+
 type snapshotParams struct {
 	ChannelID string `json:"channel_id"`
 }
@@ -51,9 +55,14 @@ type okResult struct {
 }
 
 type statusResult struct {
-	Running bool `json:"running"`
-	FPS     int  `json:"fps"`
-	Bitrate int  `json:"bitrate"`
+	Running   bool   `json:"running"`
+	FPS       int    `json:"fps"`
+	Bitrate   int    `json:"bitrate"`
+	SessionID string `json:"session_id"`
+	ChannelID string `json:"channel_id"`
+	DestIP    string `json:"dest_ip"`
+	DestPort  int    `json:"dest_port"`
+	SSRC      string `json:"ssrc"`
 }
 
 type eventSubscribeParams struct {

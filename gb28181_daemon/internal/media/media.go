@@ -28,9 +28,14 @@ type Target struct {
 
 // Status is a snapshot of media engine state.
 type Status struct {
-	Running bool `json:"running"`
-	FPS     int  `json:"fps"`
-	Bitrate int  `json:"bitrate"`
+	Running   bool   `json:"running"`
+	FPS       int    `json:"fps"`
+	Bitrate   int    `json:"bitrate"`
+	SessionID string `json:"session_id,omitempty"`
+	ChannelID string `json:"channel_id,omitempty"`
+	DestIP    string `json:"dest_ip,omitempty"`
+	DestPort  int    `json:"dest_port,omitempty"`
+	SSRC      string `json:"ssrc,omitempty"`
 }
 
 // Controller is the media plane interface implemented by the unix-socket
@@ -39,6 +44,7 @@ type Controller interface {
 	Ping(ctx context.Context) error
 	StartLive(ctx context.Context, target Target) error
 	StopLive(ctx context.Context, sessionID string) error
+	KeepaliveLive(ctx context.Context, sessionID string) error
 	Snapshot(ctx context.Context, channelID string) error
 	Status(ctx context.Context) (Status, error)
 }

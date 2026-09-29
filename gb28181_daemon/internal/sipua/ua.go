@@ -10,6 +10,7 @@ package sipua
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -21,6 +22,9 @@ import (
 )
 
 const contentTypeMANSCDP = "Application/MANSCDP+xml"
+
+// ErrBusy is returned by PrepareInvite when the single live slot is in use.
+var ErrBusy = errors.New("media busy")
 
 // Config carries the SIP identity and platform addressing.
 type Config struct {
@@ -56,6 +60,8 @@ type Handlers struct {
 	PrepareInvite func(info InviteInfo) error
 	// InviteAccepted starts media after the ACK was received.
 	InviteAccepted func(info InviteInfo) error
+	// InviteFailed releases a reservation when the dialog cannot be started.
+	InviteFailed func(info InviteInfo, reason string)
 	// Bye is called when the platform ends a session.
 	Bye func(callID string)
 }
@@ -269,7 +275,7 @@ func (u *UA) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	if u.handlers.PrepareInvite != nil {
 		if err := u.handlers.PrepareInvite(info); err != nil {
 			u.log.Warn("reject INVITE", "callId", info.CallID, "error", err)
-			_ = tx.Respond(sip.NewResponseFromRequest(req, 480, "Temporarily Unavailable", nil))
+			_ = tx.Respond(inviteFailureResponse(req, err))
 			return
 		}
 	}
@@ -277,11 +283,6 @@ func (u *UA) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 	answer := buildAnswerSDP(u.cfg.DeviceID, u.cfg.LocalIP, info.SSRC)
 	res := sip.NewResponseFromRequest(req, 200, "OK", []byte(answer))
 	res.AppendHeader(sip.NewHeader("Content-Type", "application/sdp"))
-	if err := tx.Respond(res); err != nil {
-		u.log.Error("respond 200 to INVITE failed", "error", err)
-		return
-	}
-
 	ackCh := make(chan struct{}, 1)
 	u.ackMu.Lock()
 	u.ackChans[info.CallID] = ackCh
@@ -291,22 +292,100 @@ func (u *UA) handleInvite(req *sip.Request, tx sip.ServerTransaction) {
 		delete(u.ackChans, info.CallID)
 		u.ackMu.Unlock()
 	}()
+	if err := tx.Respond(res); err != nil {
+		u.log.Error("respond 200 to INVITE failed", "error", err)
+		if u.handlers.InviteFailed != nil {
+			u.handlers.InviteFailed(info, fmt.Sprintf("respond 200 failed: %v", err))
+		}
+		return
+	}
 
 	select {
 	case <-ackCh:
 		u.log.Info("INVITE ACK received", "callId", info.CallID)
 	case <-time.After(2 * time.Second):
-		u.log.Warn("ACK timeout, starting media anyway", "callId", info.CallID)
+		u.log.Warn("ACK timeout, media start cancelled", "callId", info.CallID)
+		if u.handlers.InviteFailed != nil {
+			u.handlers.InviteFailed(info, "ACK timeout")
+		}
+		return
 	case <-tx.Done():
 		u.log.Warn("INVITE transaction ended before ACK", "callId", info.CallID)
+		if u.handlers.InviteFailed != nil {
+			u.handlers.InviteFailed(info, "INVITE transaction ended before ACK")
+		}
 		return
 	}
 
 	if u.handlers.InviteAccepted != nil {
 		if err := u.handlers.InviteAccepted(info); err != nil {
 			u.log.Error("media start failed", "callId", info.CallID, "error", err)
+			if u.handlers.InviteFailed != nil {
+				u.handlers.InviteFailed(info, err.Error())
+			}
+			if byeErr := u.sendFailedInviteBye(req, res); byeErr != nil {
+				u.log.Error("failed INVITE cleanup BYE failed", "callId", info.CallID,
+					"error", byeErr)
+			}
 		}
 	}
+}
+
+func inviteFailureResponse(req *sip.Request, err error) *sip.Response {
+	if errors.Is(err, ErrBusy) {
+		return sip.NewResponseFromRequest(req, sip.StatusBusyHere, "Busy Here", nil)
+	}
+	return sip.NewResponseFromRequest(req, sip.StatusTemporarilyUnavailable,
+		"Temporarily Unavailable", nil)
+}
+
+// sendFailedInviteBye terminates a dialog for which we already sent 200/ACK
+// but could not start RTP. This bounds WVP's wait to the media RPC timeout
+// instead of leaving a confirmed SIP dialog around until its 180 s timer.
+func (u *UA) sendFailedInviteBye(req *sip.Request, res *sip.Response) error {
+	bye, err := buildFailedInviteBye(req, res)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	tx, err := u.client.TransactionRequest(ctx, bye, sipgo.ClientRequestAddVia)
+	if err != nil {
+		return err
+	}
+	defer tx.Terminate()
+	resCh, err := waitResponse(tx)
+	if err != nil {
+		return err
+	}
+	if resCh.StatusCode != sip.StatusOK {
+		return fmt.Errorf("BYE rejected: %d %s", resCh.StatusCode, resCh.Reason)
+	}
+	u.log.Info("failed INVITE dialog terminated", "callId", req.CallID().Value())
+	return nil
+}
+
+func buildFailedInviteBye(req *sip.Request, res *sip.Response) (*sip.Request, error) {
+	if req == nil || res == nil || req.Contact() == nil || req.From() == nil ||
+		req.CallID() == nil || req.CSeq() == nil || res.To() == nil {
+		return nil, fmt.Errorf("incomplete INVITE dialog headers")
+	}
+	bye := sip.NewRequest(sip.BYE, req.Contact().Address)
+	from := res.To().AsFrom()
+	bye.AppendHeader(&from)
+	to := req.From().AsTo()
+	bye.AppendHeader(&to)
+	bye.AppendHeader(sip.HeaderClone(req.CallID()))
+	cseq := &sip.CSeqHeader{SeqNo: req.CSeq().SeqNo + 1, MethodName: sip.BYE}
+	bye.AppendHeader(cseq)
+	maxForwards := sip.MaxForwardsHeader(70)
+	bye.AppendHeader(&maxForwards)
+	for _, rr := range req.GetHeaders("Record-Route") {
+		bye.AppendHeader(sip.NewHeader("Route", rr.Value()))
+	}
+	bye.SetTransport(req.Transport())
+	bye.SetDestination(req.Source())
+	return bye, nil
 }
 
 func (u *UA) handleAck(req *sip.Request, _ sip.ServerTransaction) {

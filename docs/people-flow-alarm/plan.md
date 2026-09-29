@@ -248,6 +248,9 @@ outbox、原子压缩和有限重试；stock 模式下 Evidence 为 disabled，e
   图片可先于或晚于告警到达；不在标准 Alarm XML 内塞图片；
 - 验证 Alarm 列表、图片展示、重复投递去重、降级策略。
 
+当前 exact 适配边界见 `docs/people-flow-alarm/wvp-adapter-contract.md`；它只
+约束独立证据接收和关联存储，不改变 stock WVP 的 Alarm 解析或异步抓图语义。
+
 ### Phase E：整板验收与发布
 
 验收项：

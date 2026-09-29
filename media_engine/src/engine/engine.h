@@ -16,6 +16,11 @@ typedef struct {
 	bool running;
 	int fps;
 	int bitrate;
+	char session_id[ME_SESSION_ID_MAX];
+	char channel_id[ME_CHANNEL_ID_MAX];
+	char dest_ip[ME_DEST_IP_MAX];
+	int dest_port;
+	uint32_t ssrc;
 } EngineStatus;
 
 typedef void (*EngineEventCb)(void *userdata, const char *event,
@@ -50,6 +55,11 @@ int engine_start_live(Engine *e, const SessionParams *p, char *err,
                       size_t errsz);
 int engine_stop_live(Engine *e, const char *session_id, char *err,
                      size_t errsz);
+int engine_keepalive_live(Engine *e, const char *session_id, char *err,
+                          size_t errsz);
+/* Stops sessions whose daemon lease has expired. Returns the number of
+ * sessions stopped, or a negative media error. */
+int engine_reap_expired(Engine *e, char *err, size_t errsz);
 int engine_snapshot(Engine *e, const char *channel_id, char *err,
                     size_t errsz);
 int engine_get_status(Engine *e, EngineStatus *st);

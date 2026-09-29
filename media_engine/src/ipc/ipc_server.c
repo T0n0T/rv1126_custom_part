@@ -501,6 +501,33 @@ static bool ipc_handle_stop_live(IpcServer *s, IpcClient *c, uint64_t id,
 	return c->alive;
 }
 
+static bool ipc_handle_keepalive_live(IpcServer *s, IpcClient *c, uint64_t id,
+                                      cJSON *params)
+{
+	const char *session_id;
+	char errbuf[256] = {0};
+	int rc;
+
+	if (!cJSON_IsObject(params))
+		return ipc_bad_params(s, c, id,
+		                      "keepalive_live: params must be an object");
+	session_id = json_string(params, "session_id");
+	if (!session_id || !*session_id)
+		return ipc_bad_params(s, c, id,
+		                      "keepalive_live: session_id required");
+	rc = engine_keepalive_live(s->engine, session_id, errbuf, sizeof(errbuf));
+	if (rc != ME_ERR_OK) {
+		ipc_send_error(s, c, id, rc, errbuf);
+		return c->alive;
+	}
+	{
+		cJSON *result = cJSON_CreateObject();
+		cJSON_AddBoolToObject(result, "ok", TRUE);
+		ipc_send_result(s, c, id, result);
+	}
+	return c->alive;
+}
+
 static bool ipc_handle_snapshot(IpcServer *s, IpcClient *c, uint64_t id,
                                 cJSON *params)
 {
@@ -538,6 +565,15 @@ static bool ipc_handle_get_status(IpcServer *s, IpcClient *c, uint64_t id)
 	cJSON_AddBoolToObject(result, "running", st.running);
 	cJSON_AddNumberToObject(result, "fps", st.fps);
 	cJSON_AddNumberToObject(result, "bitrate", st.bitrate);
+	if (st.running) {
+		char ssrc[16];
+		snprintf(ssrc, sizeof(ssrc), "%u", st.ssrc);
+		cJSON_AddStringToObject(result, "session_id", st.session_id);
+		cJSON_AddStringToObject(result, "channel_id", st.channel_id);
+		cJSON_AddStringToObject(result, "dest_ip", st.dest_ip);
+		cJSON_AddNumberToObject(result, "dest_port", st.dest_port);
+		cJSON_AddStringToObject(result, "ssrc", ssrc);
+	}
 	ipc_send_result(s, c, id, result);
 	return c->alive;
 }
@@ -720,6 +756,9 @@ static bool ipc_handle_line(IpcServer *s, IpcClient *c, const char *line,
 			goto out;
 	} else if (!strcmp(method_name, "media.stop_live")) {
 		if (!ipc_handle_stop_live(s, c, id, params))
+			goto out;
+	} else if (!strcmp(method_name, "media.keepalive_live")) {
+		if (!ipc_handle_keepalive_live(s, c, id, params))
 			goto out;
 	} else if (!strcmp(method_name, "media.snapshot")) {
 		if (!ipc_handle_snapshot(s, c, id, params))

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"xiaoyu/gb28181-daemon/internal/config"
@@ -17,6 +18,7 @@ import (
 	"xiaoyu/gb28181-daemon/internal/media"
 	"xiaoyu/gb28181-daemon/internal/session"
 	"xiaoyu/gb28181-daemon/internal/sipua"
+	"xiaoyu/gb28181-daemon/internal/timesync"
 )
 
 const (
@@ -27,32 +29,70 @@ const (
 // Run starts the daemon and blocks until ctx is cancelled.
 func Run(ctx context.Context, cfg *config.Config) error {
 	log := newLogger(cfg)
+	if cfg.TimeSync.Enabled {
+		if err := syncClock(ctx, cfg, log); err != nil {
+			log.Warn("startup clock sync failed; retrying in background", "error", err)
+			go retryClock(ctx, cfg, log)
+		}
+	}
 	ctrl := buildMediaController(cfg, log)
 	sessions := session.NewManager()
+	var mediaMu sync.Mutex
+	if err := reconcileMedia(ctx, ctrl, cfg, log); err != nil {
+		return err
+	}
 
 	handlers := sipua.Handlers{
 		Query:   queryHandler(cfg),
 		Control: controlHandler(cfg, log),
 		PrepareInvite: func(info sipua.InviteInfo) error {
+			mediaMu.Lock()
+			defer mediaMu.Unlock()
 			if !cfg.HasChannel(info.ChannelID) {
 				return fmt.Errorf("unknown channel %q", info.ChannelID)
 			}
 			cctx, cancel := context.WithTimeout(ctx, cfg.MediaTimeout())
 			defer cancel()
-			if err := ctrl.Ping(cctx); err != nil {
+			status, err := ctrl.Status(cctx)
+			if err != nil {
 				return fmt.Errorf("media engine unavailable: %w", err)
 			}
-			return nil
-		},
-		InviteAccepted: func(info sipua.InviteInfo) error {
-			sess := sessions.Start(info.CallID, session.Live{
+			if status.Running && status.SessionID != "" && sessions.Get(status.SessionID) == nil {
+				log.Warn("releasing unowned media session before INVITE",
+					"mediaSessionId", status.SessionID, "channel", status.ChannelID,
+					"target", fmt.Sprintf("%s:%d", status.DestIP, status.DestPort),
+					"ssrc", status.SSRC)
+				if err := ctrl.StopLive(cctx, status.SessionID); err != nil {
+					return fmt.Errorf("media orphan cleanup failed: %w", err)
+				}
+				status, err = ctrl.Status(cctx)
+				if err != nil {
+					return fmt.Errorf("media status after orphan cleanup: %w", err)
+				}
+			}
+			if status.Running {
+				return fmt.Errorf("%w: session=%s channel=%s target=%s:%d ssrc=%s", sipua.ErrBusy,
+					status.SessionID, status.ChannelID, status.DestIP, status.DestPort, status.SSRC)
+			}
+			if !sessions.Reserve(info.CallID, session.Live{
 				ChannelID: info.ChannelID,
 				SSRC:      info.SSRC,
 				DestIP:    info.DestIP,
 				DestPort:  info.DestPort,
-			})
+			}) {
+				return fmt.Errorf("%w: another INVITE is pending", sipua.ErrBusy)
+			}
+			return nil
+		},
+		InviteAccepted: func(info sipua.InviteInfo) error {
+			mediaMu.Lock()
+			defer mediaMu.Unlock()
+			sess := sessions.Get(info.CallID)
+			if sess == nil || !sessions.IsPending(info.CallID) {
+				return fmt.Errorf("INVITE session %s was cancelled before ACK", info.CallID)
+			}
 			target := media.Target{
-				SessionID:   sess.CallID,
+				SessionID:   info.CallID,
 				ChannelID:   info.ChannelID,
 				Codec:       cfg.Stream.Codec,
 				Width:       cfg.Stream.Width,
@@ -67,26 +107,61 @@ func Run(ctx context.Context, cfg *config.Config) error {
 			cctx, cancel := context.WithTimeout(ctx, cfg.MediaTimeout())
 			defer cancel()
 			if err := ctrl.StartLive(cctx, target); err != nil {
-				sessions.Stop(info.CallID)
-				return err
+				// An RPC timeout is ambiguous: the engine may have started RTP
+				// but lost its reply. Stop by exact session ID before releasing
+				// the reservation; retain it for retry when stop fails.
+				stopCtx, stopCancel := context.WithTimeout(context.Background(), cfg.MediaTimeout())
+				stopErr := ctrl.StopLive(stopCtx, info.CallID)
+				stopCancel()
+				if stopErr != nil {
+					sessions.MarkCleanup(info.CallID)
+					log.Error("media start failed and stop could not confirm cleanup",
+						"callId", info.CallID, "channel", info.ChannelID,
+						"target", fmt.Sprintf("%s:%d", info.DestIP, info.DestPort),
+						"ssrc", info.SSRC, "startError", err, "stopError", stopErr)
+				} else {
+					sessions.Cancel(info.CallID)
+				}
+				return fmt.Errorf("media start failed: %w", err)
+			}
+			if sess = sessions.Activate(info.CallID); sess == nil {
+				sessions.MarkCleanup(info.CallID)
+				return fmt.Errorf("INVITE session %s could not activate after media start", info.CallID)
 			}
 			log.Info("live session started",
 				"callId", info.CallID, "channel", info.ChannelID,
-				"target", fmt.Sprintf("%s:%d", info.DestIP, info.DestPort))
+				"target", fmt.Sprintf("%s:%d", info.DestIP, info.DestPort),
+				"ssrc", info.SSRC, "mediaSessionId", sess.CallID)
 			return nil
 		},
+		InviteFailed: func(info sipua.InviteInfo, reason string) {
+			mediaMu.Lock()
+			defer mediaMu.Unlock()
+			if sess := sessions.Cancel(info.CallID); sess != nil {
+				log.Warn("INVITE session released before media start", "callId", info.CallID,
+					"channel", info.ChannelID, "reason", reason)
+			}
+		},
 		Bye: func(callID string) {
-			sess := sessions.Stop(callID)
+			mediaMu.Lock()
+			defer mediaMu.Unlock()
+			sess := sessions.Get(callID)
 			if sess == nil {
-				log.Warn("BYE for unknown session", "callId", callID)
-				return
+				log.Info("BYE for already released session", "callId", callID)
+			} else {
+				log.Info("stopping live session from BYE", "callId", callID,
+					"channel", sess.ChannelID,
+					"target", fmt.Sprintf("%s:%d", sess.DestIP, sess.DestPort),
+					"ssrc", sess.SSRC, "mediaSessionId", sess.CallID)
 			}
 			cctx, cancel := context.WithTimeout(context.Background(), cfg.MediaTimeout())
 			defer cancel()
-			if err := ctrl.StopLive(cctx, sess.CallID); err != nil {
+			if err := ctrl.StopLive(cctx, callID); err != nil {
+				sessions.MarkCleanup(callID)
 				log.Error("stop live failed", "callId", callID, "error", err)
 				return
 			}
+			sessions.Stop(callID)
 			log.Info("live session stopped", "callId", callID)
 		},
 	}
@@ -143,7 +218,8 @@ func Run(ctx context.Context, cfg *config.Config) error {
 			}
 		}()
 	}
-	go keepaliveLoop(ctx, ua, cfg, log)
+	go keepaliveLoop(ctx, ua, ctrl, sessions, &mediaMu, cfg, log)
+	go mediaLeaseLoop(ctx, ctrl, sessions, &mediaMu, cfg, log)
 
 	log.Info("gb28181 daemon running")
 	<-ctx.Done()
@@ -157,6 +233,140 @@ func Run(ctx context.Context, cfg *config.Config) error {
 		cancel()
 	}
 	return nil
+}
+
+func syncClock(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
+	timeout := time.Duration(cfg.TimeSync.TimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	var ntpErr error
+	if len(cfg.TimeSync.Servers) > 0 {
+		ntpCtx, cancel := context.WithTimeout(ctx, timeout*time.Duration(len(cfg.TimeSync.Servers)))
+		source, err := timesync.Sync(ntpCtx, cfg.TimeSync.Servers, timeout)
+		cancel()
+		if err == nil {
+			log.Info("clock synchronized", "source", source,
+				"time", time.Now().UTC().Format(time.RFC3339Nano))
+			return nil
+		}
+		ntpErr = err
+	}
+	if len(cfg.TimeSync.HTTPServers) > 0 {
+		httpCtx, cancel := context.WithTimeout(ctx, timeout*time.Duration(len(cfg.TimeSync.HTTPServers)))
+		source, err := timesync.SyncHTTP(httpCtx, cfg.TimeSync.HTTPServers, timeout)
+		cancel()
+		if err == nil {
+			log.Info("clock synchronized from HTTP Date", "source", source,
+				"time", time.Now().UTC().Format(time.RFC3339Nano))
+			return nil
+		}
+		if ntpErr != nil {
+			return fmt.Errorf("NTP: %v; HTTP Date: %w", ntpErr, err)
+		}
+		return err
+	}
+	return ntpErr
+}
+
+func retryClock(ctx context.Context, cfg *config.Config, log *slog.Logger) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := syncClock(ctx, cfg, log); err == nil {
+				return
+			} else {
+				log.Warn("clock sync retry failed", "error", err)
+			}
+		}
+	}
+}
+
+// reconcileMedia is run before REGISTER. media_engine intentionally has a
+// longer lifetime than the SIP daemon, so a daemon restart can otherwise
+// leave an active RTP branch with no Call-ID owner. Stop that orphan through
+// the normal RPC path and make the result visible in the log.
+func reconcileMedia(ctx context.Context, ctrl media.Controller, cfg *config.Config, log *slog.Logger) error {
+	cctx, cancel := context.WithTimeout(ctx, cfg.MediaTimeout())
+	defer cancel()
+	status, err := ctrl.Status(cctx)
+	if err != nil {
+		if cfg.Media.Mode == "rpc" {
+			return fmt.Errorf("inspect media engine before SIP registration: %w", err)
+		}
+		return nil
+	}
+	if !status.Running {
+		log.Info("media engine has no orphan live session")
+		return nil
+	}
+	if status.SessionID == "" {
+		return fmt.Errorf("media engine reports an active session without session_id")
+	}
+	log.Warn("releasing orphan live session before SIP registration",
+		"sessionId", status.SessionID, "channel", status.ChannelID,
+		"target", fmt.Sprintf("%s:%d", status.DestIP, status.DestPort),
+		"ssrc", status.SSRC)
+	stopCtx, stopCancel := context.WithTimeout(ctx, cfg.MediaTimeout())
+	defer stopCancel()
+	if err := ctrl.StopLive(stopCtx, status.SessionID); err != nil {
+		return fmt.Errorf("release orphan media session %s: %w", status.SessionID, err)
+	}
+	log.Info("orphan live session released", "sessionId", status.SessionID)
+	return nil
+}
+
+// mediaLeaseLoop keeps the media-engine lease alive only while the daemon
+// still owns the Call-ID. If the daemon disappears, media_engine's own lease
+// timeout stops the branch; if only the media process disappears, this loop
+// drops the stale daemon mapping so the next INVITE can recover quickly.
+func mediaLeaseLoop(ctx context.Context, ctrl media.Controller, sessions *session.Manager,
+	mediaMu *sync.Mutex, cfg *config.Config, log *slog.Logger) {
+	ticker := time.NewTicker(cfg.MediaLeaseRefresh())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			mediaMu.Lock()
+			for _, live := range sessions.All() {
+				if sessions.NeedsCleanup(live.CallID) {
+					stopOwnedMediaLocked(ctx, ctrl, sessions, cfg, log, "retry uncertain media cleanup")
+					continue
+				}
+				if live.StartedAt.IsZero() {
+					continue
+				}
+				if time.Since(live.StartedAt) >= cfg.MediaMaxLive() {
+					stopOwnedMediaLocked(ctx, ctrl, sessions, cfg, log,
+						"maximum live session duration reached without dialog refresh")
+					continue
+				}
+				leaseCtx, cancel := context.WithTimeout(ctx, cfg.MediaTimeout())
+				err := ctrl.KeepaliveLive(leaseCtx, live.CallID)
+				cancel()
+				if err == nil {
+					continue
+				}
+				statusCtx, statusCancel := context.WithTimeout(ctx, cfg.MediaTimeout())
+				status, statusErr := ctrl.Status(statusCtx)
+				statusCancel()
+				if statusErr == nil && (!status.Running || status.SessionID != live.CallID) {
+					log.Warn("media session disappeared; releasing daemon mapping",
+						"callId", live.CallID, "error", err)
+					sessions.Stop(live.CallID)
+					continue
+				}
+				log.Warn("media lease refresh failed", "callId", live.CallID, "error", err)
+			}
+			mediaMu.Unlock()
+		}
+	}
 }
 
 func queryHandler(cfg *config.Config) func(cmd, sn string) ([]byte, error) {
@@ -229,7 +439,8 @@ func registerWithRetry(ctx context.Context, ua *sipua.UA, log *slog.Logger) erro
 	return fmt.Errorf("register failed after %d attempts: %w", registerAttempts, lastErr)
 }
 
-func keepaliveLoop(ctx context.Context, ua *sipua.UA, cfg *config.Config, log *slog.Logger) {
+func keepaliveLoop(ctx context.Context, ua *sipua.UA, ctrl media.Controller,
+	sessions *session.Manager, mediaMu *sync.Mutex, cfg *config.Config, log *slog.Logger) {
 	interval := time.Duration(cfg.SIP.KeepaliveInterval) * time.Second
 	if interval <= 0 {
 		interval = 60 * time.Second
@@ -258,6 +469,10 @@ func keepaliveLoop(ctx context.Context, ua *sipua.UA, cfg *config.Config, log *s
 				log.Warn("keepalive failed", "count", failures, "error", err)
 				if failures >= keepaliveFailureLimit {
 					failures = 0
+					mediaMu.Lock()
+					stopOwnedMediaLocked(ctx, ctrl, sessions, cfg, log,
+						"platform keepalive failure")
+					mediaMu.Unlock()
 					regCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 					err := ua.Register(regCtx)
 					cancel()
@@ -278,6 +493,28 @@ func keepaliveLoop(ctx context.Context, ua *sipua.UA, cfg *config.Config, log *s
 				log.Error("periodic re-register failed", "error", err)
 			}
 		}
+	}
+}
+
+// stopOwnedMedia is the recovery path for a platform restart or a network
+// partition where BYE cannot arrive. It deliberately stops through the
+// controller before deleting the daemon mapping, so a stop RPC failure can be
+// retried by the normal lease/reconciliation paths.
+func stopOwnedMediaLocked(ctx context.Context, ctrl media.Controller,
+	sessions *session.Manager, cfg *config.Config, log *slog.Logger, reason string) {
+	for _, live := range sessions.All() {
+		stopCtx, cancel := context.WithTimeout(ctx, cfg.MediaTimeout())
+		err := ctrl.StopLive(stopCtx, live.CallID)
+		cancel()
+		if err != nil {
+			sessions.MarkCleanup(live.CallID)
+			log.Error("recovery stop live failed", "callId", live.CallID,
+				"channel", live.ChannelID, "reason", reason, "error", err)
+			continue
+		}
+		sessions.Stop(live.CallID)
+		log.Warn("live session released during signaling recovery",
+			"callId", live.CallID, "channel", live.ChannelID, "reason", reason)
 	}
 }
 

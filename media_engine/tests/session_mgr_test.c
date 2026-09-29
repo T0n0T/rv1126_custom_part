@@ -106,6 +106,16 @@ int main(void)
 	CHECK(s != NULL && s->params.ssrc == 123456789u &&
 	          s->params.payload_type == 98,
 	      "session params preserved");
+	CHECK(s != NULL && !session_mgr_expired(
+	          m, s->last_activity_us + 500000, 1000000, NULL, 0),
+	      "lease stays active before timeout");
+	CHECK(s != NULL && session_mgr_expired(
+	          m, s->last_activity_us + 1000000, 1000000, NULL, 0),
+	      "orphan lease expires at deadline");
+	CHECK(session_mgr_touch(m, "s1", err, sizeof(err)) == ME_ERR_OK,
+	      "lease refresh succeeds for owned session");
+	CHECK(session_mgr_touch(m, "absent", err, sizeof(err)) == ME_ERR_NOT_FOUND,
+	      "late lease refresh cannot revive stopped session");
 
 	fill_params(&p, "s2");
 	CHECK(session_mgr_start(m, &p, err, sizeof(err)) == ME_ERR_MEDIA,
@@ -117,8 +127,8 @@ int main(void)
 	CHECK(session_mgr_start(m, &p, err, sizeof(err)) == ME_ERR_MEDIA,
 	      "duplicate session id rejected");
 
-	CHECK(session_mgr_stop(m, "nope", err, sizeof(err)) == ME_ERR_NOT_FOUND,
-	      "stop unknown session -> not found");
+	CHECK(session_mgr_stop(m, "nope", err, sizeof(err)) == ME_ERR_OK,
+	      "stop unknown session is idempotent");
 	CHECK(session_mgr_stop(m, "s1", err, sizeof(err)) == ME_ERR_OK,
 	      "stop s1");
 	CHECK(fake.stops == 1 && strcmp(fake.last_id, "s1") == 0,
@@ -139,8 +149,11 @@ int main(void)
 	fake.fail_stop = true;
 	CHECK(session_mgr_stop(m, "s4", err, sizeof(err)) == ME_ERR_MEDIA,
 	      "backend stop failure propagates");
-	CHECK(session_mgr_count(m) == 0, "session removed even when stop failed");
+	CHECK(session_mgr_count(m) == 1, "session retained after stop failure");
 	fake.fail_stop = false;
+	CHECK(session_mgr_stop(m, "s4", err, sizeof(err)) == ME_ERR_OK,
+	      "retry stop after backend failure");
+	CHECK(session_mgr_count(m) == 0, "session removed after successful retry");
 
 	/* Shutdown must stop active sessions. */
 	fill_params(&p, "s5");

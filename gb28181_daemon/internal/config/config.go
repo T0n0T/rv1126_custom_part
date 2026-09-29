@@ -14,12 +14,13 @@ import (
 // Config is the top-level daemon configuration. Unknown JSON fields are
 // ignored so the file can grow without breaking older binaries.
 type Config struct {
-	SIP      SIPConfig    `json:"sip"`
-	Media    MediaConfig  `json:"media"`
-	Stream   StreamConfig `json:"stream"`
-	Events   EventsConfig `json:"events"`
-	Channels []Channel    `json:"channels"`
-	Log      LogConfig    `json:"log"`
+	SIP      SIPConfig      `json:"sip"`
+	Media    MediaConfig    `json:"media"`
+	Stream   StreamConfig   `json:"stream"`
+	Events   EventsConfig   `json:"events"`
+	TimeSync TimeSyncConfig `json:"time_sync"`
+	Channels []Channel      `json:"channels"`
+	Log      LogConfig      `json:"log"`
 }
 
 type SIPConfig struct {
@@ -35,10 +36,20 @@ type SIPConfig struct {
 }
 
 type MediaConfig struct {
-	Mode      string `json:"mode"` // "none" | "rpc"
-	Socket    string `json:"socket"`
-	TimeoutMS int    `json:"timeout_ms"`
-	Simulate  bool   `json:"simulate"`
+	Mode          string `json:"mode"` // "none" | "rpc"
+	Socket        string `json:"socket"`
+	TimeoutMS     int    `json:"timeout_ms"`
+	Simulate      bool   `json:"simulate"`
+	LeaseTimeoutS int    `json:"lease_timeout_s"`
+	LeaseRefreshS int    `json:"lease_refresh_s"`
+	MaxLiveS      int    `json:"max_live_s"`
+}
+
+type TimeSyncConfig struct {
+	Enabled     bool     `json:"enabled"`
+	Servers     []string `json:"servers"`
+	HTTPServers []string `json:"http_servers"`
+	TimeoutMS   int      `json:"timeout_ms"`
 }
 
 type StreamConfig struct {
@@ -107,9 +118,17 @@ func defaults() *Config {
 			RegisterRefresh:   300,
 		},
 		Media: MediaConfig{
-			Mode:      "none",
-			Socket:    "/var/run/gb28181_media.sock",
-			TimeoutMS: 3000,
+			Mode:          "none",
+			Socket:        "/var/run/gb28181_media.sock",
+			TimeoutMS:     3000,
+			LeaseTimeoutS: 90,
+			LeaseRefreshS: 10,
+			MaxLiveS:      900,
+		},
+		TimeSync: TimeSyncConfig{
+			Enabled:   true,
+			Servers:   []string{"pool.ntp.org:123", "time.google.com:123", "time.cloudflare.com:123"},
+			TimeoutMS: 2000,
 		},
 		Stream: StreamConfig{
 			Codec:       "h264",
@@ -149,6 +168,27 @@ func (c *Config) MediaTimeout() time.Duration {
 	return time.Duration(c.Media.TimeoutMS) * time.Millisecond
 }
 
+func (c *Config) MediaLeaseTimeout() time.Duration {
+	if c.Media.LeaseTimeoutS <= 0 {
+		return 90 * time.Second
+	}
+	return time.Duration(c.Media.LeaseTimeoutS) * time.Second
+}
+
+func (c *Config) MediaLeaseRefresh() time.Duration {
+	if c.Media.LeaseRefreshS <= 0 {
+		return 10 * time.Second
+	}
+	return time.Duration(c.Media.LeaseRefreshS) * time.Second
+}
+
+func (c *Config) MediaMaxLive() time.Duration {
+	if c.Media.MaxLiveS <= 0 {
+		return 15 * time.Minute
+	}
+	return time.Duration(c.Media.MaxLiveS) * time.Second
+}
+
 func (c *Config) HasChannel(id string) bool {
 	return c.Channel(id) != nil
 }
@@ -184,6 +224,27 @@ func (c *Config) validate() error {
 	}
 	if c.SIP.Password == "" {
 		return errors.New("sip.password is required")
+	}
+	if c.Media.LeaseTimeoutS > 0 && c.Media.LeaseRefreshS > 0 &&
+		c.Media.LeaseRefreshS >= c.Media.LeaseTimeoutS {
+		return errors.New("media.lease_refresh_s must be less than media.lease_timeout_s")
+	}
+	if c.Media.MaxLiveS < 0 {
+		return errors.New("media.max_live_s cannot be negative")
+	}
+	if c.TimeSync.TimeoutMS < 0 {
+		return errors.New("time_sync.timeout_ms cannot be negative")
+	}
+	if c.TimeSync.Enabled && len(c.TimeSync.Servers) == 0 {
+		if len(c.TimeSync.HTTPServers) == 0 {
+			return errors.New("time_sync.servers or time_sync.http_servers is required when time_sync is enabled")
+		}
+	}
+	for _, raw := range c.TimeSync.HTTPServers {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("time_sync.http_servers entry must be an http(s) URL: %q", raw)
+		}
 	}
 	switch c.Media.Mode {
 	case "none", "rpc":

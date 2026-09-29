@@ -83,6 +83,17 @@ func (r *RPC) StopLive(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+func (r *RPC) KeepaliveLive(ctx context.Context, sessionID string) error {
+	var out okResult
+	if err := r.call(ctx, "media.keepalive_live", keepaliveLiveParams{SessionID: sessionID}, &out); err != nil {
+		return err
+	}
+	if !out.OK {
+		return fmt.Errorf("media keepalive_live returned ok=false")
+	}
+	return nil
+}
+
 func (r *RPC) Snapshot(ctx context.Context, channelID string) error {
 	var out okResult
 	if err := r.call(ctx, "media.snapshot", snapshotParams{ChannelID: channelID}, &out); err != nil {
@@ -99,7 +110,11 @@ func (r *RPC) Status(ctx context.Context) (Status, error) {
 	if err := r.call(ctx, "media.get_status", nil, &out); err != nil {
 		return Status{}, err
 	}
-	return Status{Running: out.Running, FPS: out.FPS, Bitrate: out.Bitrate}, nil
+	return Status{
+		Running: out.Running, FPS: out.FPS, Bitrate: out.Bitrate,
+		SessionID: out.SessionID, ChannelID: out.ChannelID,
+		DestIP: out.DestIP, DestPort: out.DestPort, SSRC: out.SSRC,
+	}, nil
 }
 
 // ConsumeEvents keeps one Unix-socket connection open until the producer or

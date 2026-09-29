@@ -2,8 +2,10 @@ package media
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 )
 
 // Noop is a placeholder controller used before media_engine exists.
@@ -15,6 +17,8 @@ import (
 type Noop struct {
 	Simulate bool
 	Log      *slog.Logger
+	mu       sync.Mutex
+	active   Status
 }
 
 func (n *Noop) Ping(ctx context.Context) error {
@@ -32,6 +36,11 @@ func (n *Noop) StartLive(ctx context.Context, target Target) error {
 	n.Log.Info("media start_live (simulated)",
 		"session", target.SessionID, "channel", target.ChannelID,
 		"dest", target.DestIP+":"+strconv.Itoa(target.DestPort), "ssrc", target.SSRC)
+	n.mu.Lock()
+	n.active = Status{Running: true, FPS: target.FPS, Bitrate: target.Bitrate,
+		SessionID: target.SessionID, ChannelID: target.ChannelID, DestIP: target.DestIP,
+		DestPort: target.DestPort, SSRC: target.SSRC}
+	n.mu.Unlock()
 	return nil
 }
 
@@ -40,7 +49,28 @@ func (n *Noop) StopLive(ctx context.Context, sessionID string) error {
 		return ErrUnavailable
 	}
 	n.Log.Info("media stop_live (simulated)", "session", sessionID)
+	n.mu.Lock()
+	if !n.active.Running || n.active.SessionID != sessionID {
+		n.mu.Unlock()
+		return nil
+	}
+	n.active = Status{}
+	n.mu.Unlock()
 	return nil
+}
+
+func (n *Noop) KeepaliveLive(ctx context.Context, sessionID string) error {
+	if !n.Simulate {
+		return ErrUnavailable
+	}
+	n.mu.Lock()
+	active := n.active.Running && n.active.SessionID == sessionID
+	n.mu.Unlock()
+	if active {
+		n.Log.Debug("media keepalive_live (simulated)", "session", sessionID)
+		return nil
+	}
+	return fmt.Errorf("media session not found: %s", sessionID)
 }
 
 func (n *Noop) Snapshot(ctx context.Context, channelID string) error {
@@ -55,5 +85,7 @@ func (n *Noop) Status(ctx context.Context) (Status, error) {
 	if !n.Simulate {
 		return Status{}, ErrUnavailable
 	}
-	return Status{Running: true}, nil
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.active, nil
 }

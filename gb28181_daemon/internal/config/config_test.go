@@ -2,6 +2,28 @@ package config
 
 import "testing"
 
+func TestLiveLeaseAndClockConfig(t *testing.T) {
+	cfg := validConfigForTest()
+	if cfg.Media.LeaseTimeoutS != 90 || cfg.Media.LeaseRefreshS != 10 ||
+		cfg.Media.MaxLiveS != 900 {
+		t.Fatalf("unexpected live lease defaults: %+v", cfg.Media)
+	}
+	cfg.TimeSync.Servers = nil
+	cfg.TimeSync.HTTPServers = []string{"http://192.168.1.88:8181/"}
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("local HTTP startup time source should be allowed: %v", err)
+	}
+	cfg.TimeSync.HTTPServers = []string{"ftp://192.168.1.88/"}
+	if err := cfg.validate(); err == nil {
+		t.Fatal("unsupported clock source scheme should be rejected")
+	}
+	cfg.TimeSync.HTTPServers = []string{"http://192.168.1.88:8181/"}
+	cfg.Media.MaxLiveS = -1
+	if err := cfg.validate(); err == nil {
+		t.Fatal("negative maximum live duration should be rejected")
+	}
+}
+
 func validConfigForTest() *Config {
 	cfg := defaults()
 	cfg.SIP.DeviceID = "35020000001320000001"

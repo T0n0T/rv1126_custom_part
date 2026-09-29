@@ -432,16 +432,18 @@ int gst_runner_start_live(GstRunner *r, const SessionParams *p, char *err,
 
 fail_branch_attached:
 	gst_pad_unlink(src, sink);
-	gst_element_release_request_pad(r->tee, src);
-	gst_object_unref(src);
-	src = NULL;
-	gst_object_unref(sink);
-	sink = NULL;
 fail_branch:
-	if (src)
+	if (src) {
+		gst_element_release_request_pad(r->tee, src);
 		gst_object_unref(src);
+	}
 	if (sink)
 		gst_object_unref(sink);
+	r->live.tee_src = NULL;
+	r->live.branch_sink = NULL;
+	r->live.session_id[0] = '\0';
+	r->live.fps = 0;
+	r->live.bitrate = 0;
 	if (r->live.branch) {
 		gst_element_set_state(r->live.branch, GST_STATE_NULL);
 		if (added)

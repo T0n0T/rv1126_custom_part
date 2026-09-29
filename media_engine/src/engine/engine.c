@@ -6,6 +6,7 @@
 
 #include <string.h>
 #include <strings.h>
+#include <stdio.h>
 
 typedef struct {
 	Engine *engine;
@@ -29,7 +30,18 @@ static void engine_gst_event(void *userdata, const char *event,
                              const char *session_id, const char *message)
 {
 	Engine *e = userdata;
+	char err[256] = {0};
 
+	/* A branch can fail asynchronously after start_live succeeded.  Release
+	 * the matching media session instead of leaving a false active slot. */
+	if (session_id && *session_id &&
+	    (!strcmp(event, "error") || !strcmp(event, "eos"))) {
+		int rc = session_mgr_stop(e->sessions, session_id, err, sizeof(err));
+		if (rc != ME_ERR_OK)
+			me_log(ME_LOG_ERROR,
+			       "media fault cleanup failed: session_id=%s event=%s rc=%d reason=%s",
+			       session_id, event, rc, err[0] ? err : "unknown");
+	}
 	if (e->event_cb)
 		 e->event_cb(e->event_userdata, event, session_id, message);
 }
@@ -238,6 +250,39 @@ int engine_stop_live(Engine *e, const char *session_id, char *err,
 	return session_mgr_stop(e->sessions, session_id, err, errsz);
 }
 
+int engine_keepalive_live(Engine *e, const char *session_id, char *err,
+                          size_t errsz)
+{
+	return session_mgr_touch(e->sessions, session_id, err, errsz);
+}
+
+int engine_reap_expired(Engine *e, char *err, size_t errsz)
+{
+	char session_id[ME_SESSION_ID_MAX];
+	int rc;
+
+	if (e->cfg.live_lease_timeout_s <= 0)
+		return 0;
+	if (!session_mgr_expired(e->sessions, g_get_monotonic_time(),
+	                         (int64_t)e->cfg.live_lease_timeout_s * G_USEC_PER_SEC,
+	                         session_id, sizeof(session_id)))
+		return 0;
+	me_log(ME_LOG_WARN,
+	       "live lease expired: session_id=%s timeout_s=%d; stopping orphan",
+	       session_id, e->cfg.live_lease_timeout_s);
+	rc = session_mgr_stop(e->sessions, session_id, err, errsz);
+	if (rc != ME_ERR_OK) {
+		me_log(ME_LOG_ERROR,
+		       "orphan session stop failed: session_id=%s rc=%d reason=%s",
+		       session_id, rc, err && err[0] ? err : "unknown");
+		return rc;
+	}
+	if (e->event_cb)
+		e->event_cb(e->event_userdata, "lease_expired", session_id,
+		            "daemon lease not refreshed");
+	return 1;
+}
+
 int engine_snapshot(Engine *e, const char *channel_id, char *err,
                     size_t errsz)
 {
@@ -249,8 +294,18 @@ int engine_get_status(Engine *e, EngineStatus *st)
 {
 	const MediaSession *s = session_mgr_active(e->sessions);
 
+	memset(st, 0, sizeof(*st));
 	st->running = s != NULL;
 	st->fps = s ? s->params.fps : 0;
 	st->bitrate = s ? s->params.bitrate : 0;
+	if (s) {
+		snprintf(st->session_id, sizeof(st->session_id), "%s",
+		         s->params.session_id);
+		snprintf(st->channel_id, sizeof(st->channel_id), "%s",
+		         s->params.channel_id);
+		snprintf(st->dest_ip, sizeof(st->dest_ip), "%s", s->params.dest_ip);
+		st->dest_port = s->params.dest_port;
+		st->ssrc = s->params.ssrc;
+	}
 	return 0;
 }

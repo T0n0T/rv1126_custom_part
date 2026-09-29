@@ -83,6 +83,7 @@ stream_rotation: 0  # 推流旋转：0/90/180/270（RGA 硬件旋转，仅推流
 af_mode: off
 socket: /var/run/gb28181_media.sock
 snapshot_dir: /data/media_engine/snapshots
+live_lease_timeout_s: 90  # daemon 消失或未续租后回收 RTP 分支
 ```
 
 ```sh
@@ -116,8 +117,9 @@ snapshot_dir: /data/media_engine/snapshots
 | `media.ping` | - | `{"ok":true}` |
 | `media.start_live` | session_id, channel_id, codec, width, height, fps, bitrate, dest_ip, dest_port, ssrc, payload_type | `{"ok":true}` |
 | `media.stop_live` | session_id | `{"ok":true}` |
+| `media.keepalive_live` | session_id | `{"ok":true}` |
 | `media.snapshot` | channel_id | `{"ok":true}` |
-| `media.get_status` | - | `{"running":bool,"fps":int,"bitrate":int}` |
+| `media.get_status` | - | `{"running":bool,"fps":int,"bitrate":int,"session_id":string,"channel_id":string,"dest_ip":string,"dest_port":int,"ssrc":string}`（活动时含会话字段） |
 | `media.subscribe_events` | optional `after_cursor` | `subscribed/replay_gap/oldest_cursor/latest_cursor` |
 | `media.ack_events` | `cursor` | `acked_cursor` |
 

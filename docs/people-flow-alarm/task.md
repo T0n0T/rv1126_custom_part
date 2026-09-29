@@ -285,12 +285,15 @@ path remain downstream acceptance items.
 
 **Blocked by:** T6、T7。
 
-**Status:** blocked
+**Status:** in progress（WVP 适配器代码与本地测试完成；运行态验收待补）
 
-- [ ] 通过 `event_id/evidence_id` 幂等关联标准 Alarm 和 HTTP 证据。
-- [ ] 支持图片先到、Alarm 先到、重复请求和重启恢复。
-- [ ] 关联失败、校验失败和过期证据具有明确的可见状态。
-- [ ] 不要求在 GB28181 Alarm XML 中加入非标准图片字段。
+- [x] 通过 `event_id/evidence_id` 幂等关联标准 Alarm 和 HTTP 证据；监听入口接在
+      WVP 已解析的 `DeviceAlarmEvent` 之后，使用当前线上的 channel 身份回退。
+- [x] 支持图片先到、Alarm 先到、重复请求和重启恢复；已有 H2/JDBC 本地测试。
+- [x] 关联失败、校验失败和过期证据具有明确的可见状态，并提供状态查询接口。
+- [x] 不要求在 GB28181 Alarm XML 中加入非标准图片字段。
+
+WVP/ZLM/SIP 运行态接收、页面展示和 stock 抓图限制仍未验收。
 
 ### T11 — stock WVP 真板发布验收
 

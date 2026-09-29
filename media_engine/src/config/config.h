@@ -21,6 +21,7 @@
 #define ME_CFG_DEFAULT_PREVIEW_WIDTH 480
 #define ME_CFG_DEFAULT_PREVIEW_HEIGHT 800
 #define ME_CFG_DEFAULT_SNAPSHOT_DIR "/data/media_engine/snapshots"
+#define ME_CFG_DEFAULT_LIVE_LEASE_TIMEOUT_S 90
 
 typedef struct {
 	int cam_id;
@@ -40,6 +41,7 @@ typedef struct {
 	char af_mode[16];
 	char socket_path[ME_CFG_SOCKET_MAX];
 	char snapshot_dir[ME_CFG_PATH_MAX];
+	int live_lease_timeout_s;
 	MeAnalyticsConfig analytics;
 } EngineConfig;
 

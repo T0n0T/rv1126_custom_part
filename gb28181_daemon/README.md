@@ -51,6 +51,14 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -buildvcs=false -o bin/gb28181-da
   JSON 协议，见 `docs/ipc_architecture.md`）。
 - `media.simulate=true`：Noop 控制器假装成功，用于在没有 media_engine 时
   联调 WVP 的完整 SIP 闭环（注册→目录→INVITE→ACK→BYE）。
+- `media.lease_refresh_s` 定期确认活动 Call-ID；`media_engine` 在
+  `live_lease_timeout_s` 内未收到续租会停止孤儿 RTP 分支。`media.max_live_s`
+  默认 900 秒，作为 BYE 丢失且平台仍响应心跳时的有界兜底；达到上限会
+  主动停止直播，部署时须按允许的单次播放时长设置。媒体忙的 INVITE 返回
+  `486 Busy Here`，不会先返回 200 再让 WVP 等 RTP 超时。
+- `time_sync` 优先使用配置的 SNTP 服务器；局域网 UDP/123 不通时，可通过
+  `http_servers` 使用可信 WVP 主机的 HTTP `Date` 头启动校时。失败后每 30 秒
+  重试直到成功。板端配置 URL 前需保证该主机系统时间可信。
 - `stream`：INVITE 协商后下发给媒体引擎的编码参数。
 - `events.enabled=true`：启用 media_engine 长连接事件订阅和持久 Alarm outbox，
   要求 `media.mode=rpc`；默认只发送 `START`，`UPDATE/END` 需要显式打开。

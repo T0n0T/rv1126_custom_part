@@ -1,0 +1,103 @@
+#!/bin/sh
+# Start media_engine before the SIP daemon; stop them in reverse order.
+
+GB_BIN=/oem/usr/bin
+GB_CFG=/oem/usr/share
+GB_SOCK=/var/run/gb28181_media.sock
+ME_LOG=/data/log/media_engine.log
+DAEMON_LOG=/data/log/gb28181-daemon.log
+ME_PID=/var/run/media_engine.pid
+DAEMON_PID=/var/run/gb28181-daemon.pid
+
+# PID files can be stale after a crash. Check the executable, then scan /proc
+# so a live process is never hidden by a missing or reused PID file.
+is_process()
+{
+    [ -n "$1" ] && [ "$(readlink "/proc/$1/exe" 2>/dev/null)" = "$GB_BIN/$2" ]
+}
+
+list_processes()
+{
+    name=$1
+    pid_file=$2
+    saved=
+    [ -f "$pid_file" ] && saved=$(cat "$pid_file")
+    if is_process "$saved" "$name"; then
+        echo "$saved"
+    fi
+    for proc in /proc/[0-9]*; do
+        pid=${proc#/proc/}
+        [ "$pid" = "$saved" ] && continue
+        is_process "$pid" "$name" && echo "$pid"
+    done
+}
+
+stop_service()
+{
+    name=$1
+    pid_file=$2
+    for pid in $(list_processes "$name" "$pid_file"); do
+        kill "$pid" 2>/dev/null || true
+        waited=0
+        while is_process "$pid" "$name" && [ "$waited" -lt 10 ]; do
+            sleep 1
+            waited=$((waited + 1))
+        done
+        if is_process "$pid" "$name"; then
+            echo "$name PID $pid did not stop; forcing exit" >&2
+            kill -9 "$pid" 2>/dev/null || true
+            sleep 1
+        fi
+    done
+    if [ -n "$(list_processes "$name" "$pid_file")" ]; then
+        echo "$name is still running" >&2
+        return 1
+    fi
+    rm -f "$pid_file"
+}
+
+start()
+{
+    mkdir -p /data/log /var/run
+    export LD_LIBRARY_PATH=/oem/usr/lib:/oem/usr/lib/gstreamer-1.0
+    export GST_PLUGIN_PATH=/oem/usr/lib/gstreamer-1.0
+    export GST_PLUGIN_SCANNER=/oem/usr/libexec/gstreamer-1.0/gst-plugin-scanner
+
+    if [ -z "$(list_processes media_engine "$ME_PID")" ]; then
+        # Remove the socket only after proving that no server owns it.
+        rm -f "$GB_SOCK"
+        nohup "$GB_BIN/media_engine" --config "$GB_CFG/media_engine.yaml" \
+            >> "$ME_LOG" 2>&1 &
+        echo $! > "$ME_PID"
+        sleep 2
+    fi
+    if [ -z "$(list_processes media_engine "$ME_PID")" ] || [ ! -S "$GB_SOCK" ]; then
+        echo "media_engine failed to start or create its socket" >&2
+        return 1
+    fi
+
+    if [ -z "$(list_processes gb28181-daemon "$DAEMON_PID")" ]; then
+        nohup "$GB_BIN/gb28181-daemon" -config "$GB_CFG/gb28181.json" \
+            >> "$DAEMON_LOG" 2>&1 &
+        echo $! > "$DAEMON_PID"
+        sleep 1
+    fi
+    [ -n "$(list_processes gb28181-daemon "$DAEMON_PID")" ] || {
+        echo "gb28181-daemon failed to start" >&2
+        return 1
+    }
+}
+
+stop()
+{
+    stop_service gb28181-daemon "$DAEMON_PID" || return 1
+    stop_service media_engine "$ME_PID" || return 1
+    rm -f "$GB_SOCK"
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop && start ;;
+    *) echo "usage: $0 {start|stop|restart}" >&2; exit 1 ;;
+esac

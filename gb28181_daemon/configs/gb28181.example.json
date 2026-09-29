@@ -14,7 +14,16 @@
     "mode": "none",
     "socket": "/var/run/gb28181_media.sock",
     "timeout_ms": 3000,
-    "simulate": false
+    "simulate": false,
+    "lease_timeout_s": 90,
+    "lease_refresh_s": 10,
+    "max_live_s": 900
+  },
+  "time_sync": {
+    "enabled": true,
+    "servers": ["pool.ntp.org:123", "time.google.com:123"],
+    "http_servers": ["http://192.168.1.88:8181/"],
+    "timeout_ms": 2000
   },
   "stream": {
     "codec": "h264",

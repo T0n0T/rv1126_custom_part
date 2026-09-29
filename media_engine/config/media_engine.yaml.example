@@ -29,6 +29,7 @@ af_mode: off
 
 socket: /var/run/gb28181_media.sock
 snapshot_dir: /data/media_engine/snapshots
+live_lease_timeout_s: 90  # stop an orphan after 90 seconds without daemon keepalive
 
 # Analytics is intentionally disabled at factory default.  Once T1 has
 # measured a board-supported model/input, set enabled and fill width/height/

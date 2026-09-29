@@ -3,6 +3,7 @@
 #include "common/util.h"
 
 #include <glib.h>
+#include <stdio.h>
 #include <string.h>
 
 struct SessionMgr {
@@ -99,32 +100,84 @@ int session_mgr_start(SessionMgr *m, const SessionParams *p, char *err,
 
 	s = g_new0(MediaSession, 1);
 	s->params = *p;
+	s->last_activity_us = g_get_monotonic_time();
 	g_hash_table_insert(m->sessions, g_strdup(p->session_id), s);
-	me_log(ME_LOG_INFO, "session %s started: %s:%d codec=%s ssrc=%u pt=%d",
-	       p->session_id, p->dest_ip, p->dest_port, p->codec, p->ssrc,
-	       p->payload_type);
+	me_log(ME_LOG_INFO,
+	       "session started: session_id=%s channel_id=%s target=%s:%d "
+	       "codec=%s ssrc=%u pt=%d lease_started_us=%" G_GINT64_FORMAT,
+	       p->session_id, p->channel_id, p->dest_ip, p->dest_port, p->codec,
+	       p->ssrc, p->payload_type, s->last_activity_us);
 	return ME_ERR_OK;
+}
+
+int session_mgr_touch(SessionMgr *m, const char *session_id, char *err,
+                      size_t errsz)
+{
+	MediaSession *s = g_hash_table_lookup(m->sessions, session_id);
+
+	if (!s) {
+		me_set_err(err, errsz, "session not found: %s", session_id);
+		return ME_ERR_NOT_FOUND;
+	}
+	s->last_activity_us = g_get_monotonic_time();
+	return ME_ERR_OK;
+}
+
+bool session_mgr_expired(SessionMgr *m, int64_t now_us, int64_t timeout_us,
+                         char *session_id, size_t session_id_sz)
+{
+	GHashTableIter iter;
+	gpointer key, value;
+	MediaSession *s;
+
+	if (timeout_us <= 0)
+		return false;
+	g_hash_table_iter_init(&iter, m->sessions);
+	if (!g_hash_table_iter_next(&iter, &key, &value))
+		return false;
+	s = value;
+	if (now_us - s->last_activity_us < timeout_us)
+		return false;
+	if (session_id && session_id_sz > 0)
+		snprintf(session_id, session_id_sz, "%s", (const char *)key);
+	return true;
 }
 
 int session_mgr_stop(SessionMgr *m, const char *session_id, char *err,
                      size_t errsz)
 {
 	MediaSession *s = g_hash_table_lookup(m->sessions, session_id);
+	char channel[ME_CHANNEL_ID_MAX];
+	char dest_ip[ME_DEST_IP_MAX];
+	uint32_t ssrc;
+	int dest_port;
 	int rc;
 
 	if (!s) {
-		me_set_err(err, errsz, "session not found: %s", session_id);
-		return ME_ERR_NOT_FOUND;
+		me_log(ME_LOG_INFO, "session stop idempotent: session_id=%s not found",
+		       session_id);
+		return ME_ERR_OK;
 	}
 
 	rc = m->backend.stop_live(m->backend.data, session_id, err, errsz);
-	g_hash_table_remove(m->sessions, session_id);
-	if (rc != ME_ERR_OK) {
+	if (rc != ME_ERR_OK && rc != ME_ERR_NOT_FOUND) {
 		me_log(ME_LOG_WARN,
-		       "session %s removed despite backend stop error %d",
-		       session_id, rc);
+		       "session stop failed: session_id=%s rc=%d error=%s (retained for retry)",
+		       session_id, rc, err && err[0] ? err : "unknown");
 		return rc;
 	}
-	me_log(ME_LOG_INFO, "session %s stopped", session_id);
+	/* Copy fields before removing the hash entry.  The value destructor owns
+	 * MediaSession, so retaining pointers into `s` after remove is a
+	 * use-after-free in the stop log. */
+	snprintf(channel, sizeof(channel), "%s", s->params.channel_id);
+	snprintf(dest_ip, sizeof(dest_ip), "%s", s->params.dest_ip);
+	dest_port = s->params.dest_port;
+	ssrc = s->params.ssrc;
+	g_hash_table_remove(m->sessions, session_id);
+	me_log(ME_LOG_INFO,
+	       "session stopped: session_id=%s channel_id=%s target=%s:%d "
+	       "ssrc=%u result=%s",
+	       session_id, channel, dest_ip, dest_port, ssrc,
+	       rc == ME_ERR_NOT_FOUND ? "already-gone" : "ok");
 	return ME_ERR_OK;
 }

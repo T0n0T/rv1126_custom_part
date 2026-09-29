@@ -38,12 +38,21 @@ static void setup_gst_environment(void)
 		       "/oem/usr/libexec/gstreamer-1.0/gst-plugin-scanner", 0);
 }
 
+static gboolean reap_expired_live(gpointer userdata)
+{
+	Engine *e = userdata;
+	char err[256] = {0};
+	(void)engine_reap_expired(e, err, sizeof(err));
+	return G_SOURCE_CONTINUE;
+}
+
 int main(int argc, char **argv)
 {
 	EngineConfig cfg;
 	Engine engine;
 	IpcServer server;
 	GMainLoop *loop = NULL;
+	guint lease_reaper = 0;
 	char err[256];
 	int rc;
 
@@ -78,10 +87,14 @@ int main(int argc, char **argv)
 	loop = g_main_loop_new(NULL, FALSE);
 	g_unix_signal_add(SIGINT, on_signal, loop);
 	g_unix_signal_add(SIGTERM, on_signal, loop);
+	if (cfg.live_lease_timeout_s > 0)
+		lease_reaper = g_timeout_add_seconds(1, reap_expired_live, &engine);
 	me_log(ME_LOG_INFO, "media_engine ready (socket=%s)", cfg.socket_path);
 
 	g_main_loop_run(loop);
 
+	if (lease_reaper)
+		g_source_remove(lease_reaper);
 	engine_deinit(&engine);
 	while (g_main_context_pending(NULL))
 		g_main_context_iteration(NULL, FALSE);

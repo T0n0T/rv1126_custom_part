@@ -136,6 +136,7 @@ void engine_config_defaults(EngineConfig *cfg)
 	         ME_CFG_DEFAULT_SOCKET);
 	snprintf(cfg->snapshot_dir, sizeof(cfg->snapshot_dir), "%s",
 	         ME_CFG_DEFAULT_SNAPSHOT_DIR);
+	cfg->live_lease_timeout_s = ME_CFG_DEFAULT_LIVE_LEASE_TIMEOUT_S;
 	me_analytics_config_defaults(&cfg->analytics);
 }
 
@@ -143,6 +144,10 @@ int engine_config_validate(const EngineConfig *cfg, char *err, size_t errsz)
 {
 	if (!cfg) {
 		me_set_err(err, errsz, "engine config is null");
+		return -1;
+	}
+	if (cfg->live_lease_timeout_s < 0) {
+		me_set_err(err, errsz, "live_lease_timeout_s cannot be negative");
 		return -1;
 	}
 	return me_analytics_config_validate(&cfg->analytics, err, errsz);
@@ -155,7 +160,8 @@ static bool is_known_key(const char *key)
 	    "width",        "height",     "fps",      "connector_id",
 	    "plane_id",     "preview",    "preview_rotation", "stream_rotation",
 	    "preview_width", "preview_height", "af_mode", "socket",
-	    "socket_path",  "snapshot_dir", "analytics_enabled",
+	    "socket_path",  "snapshot_dir", "live_lease_timeout_s",
+	    "analytics_enabled",
 	    "analytics_backend", "analytics_model", "analytics_width",
 	    "analytics_height", "analytics_fps", "analytics_score_threshold_q",
 	    "analytics_confirm_frames", "analytics_confirm_ms",
@@ -346,6 +352,10 @@ static int config_apply_document(EngineConfig *cfg, yaml_document_t *doc,
 			if (set_string(cfg->snapshot_dir, sizeof(cfg->snapshot_dir),
 			               value, key, path,
 			               (int)knode->start_mark.line + 1, err, errsz) != 0)
+				return -1;
+		} else if (!strcmp(key, "live_lease_timeout_s")) {
+			if (parse_int_value(value, &cfg->live_lease_timeout_s, key, err,
+			                    errsz) != 0)
 				return -1;
 		} else if (!strcmp(key, "analytics_enabled")) {
 			if (!parse_bool_value(value, &b)) {
