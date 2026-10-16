@@ -1,0 +1,9 @@
+#ifndef ME_TEST_DRMRGA_H
+#define ME_TEST_DRMRGA_H
+
+#define HAL_TRANSFORM_ROT_90 4
+#define HAL_TRANSFORM_ROT_180 3
+#define HAL_TRANSFORM_ROT_270 7
+#define RK_FORMAT_YCbCr_420_SP 0
+
+#endif

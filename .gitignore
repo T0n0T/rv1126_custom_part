@@ -12,6 +12,8 @@ media_engine/tests/event_journal_test
 media_engine/tests/evidence_cache_test
 media_engine/tests/rpc_client
 media_engine/tests/session_mgr_test
+media_engine/tests/gst_runner_lifecycle_test
+media_engine/tests/me_rga_allocation_test
 media_engine/tests/board/rockiva_probe/rockiva_probe
 media_engine/tests/board/rockiva_probe/rockiva_probe_stub
 media_engine/tests/board/rockiva_probe/rockiva_probe_scanbuild_stub

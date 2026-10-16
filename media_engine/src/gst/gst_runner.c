@@ -16,6 +16,17 @@
 
 #define ME_GST_BASE_READY_TIMEOUT (5 * GST_SECOND)
 
+typedef enum {
+	LIVE_PHASE_IDLE = 0,
+	LIVE_PHASE_STARTING,
+	LIVE_PHASE_ACTIVE,
+	LIVE_PHASE_STOPPING,
+	LIVE_PHASE_WAITING_NULL,
+	LIVE_PHASE_BUS_DRAIN,
+	LIVE_PHASE_DESTROYED,
+	LIVE_PHASE_FAILED,
+} LiveBranchPhase;
+
 typedef struct {
 	char session_id[ME_SESSION_ID_MAX];
 	int fps;
@@ -23,6 +34,7 @@ typedef struct {
 	GstPad *tee_src;     /* requested tee src pad (owned ref) */
 	GstPad *branch_sink; /* branch bin sink pad (owned ref) */
 	GstElement *branch;  /* branch bin (owned ref) */
+	LiveBranchPhase phase;
 	guint teardown_idle;
 } LiveBranch;
 
@@ -43,6 +55,8 @@ struct GstRunner {
 	GstRunnerEventCb event_cb;
 	void *event_userdata;
 };
+
+static void live_branch_schedule_destroy(GstRunner *r);
 
 static void runner_emit_event(GstRunner *r, const char *event,
                               const char *session_id, const char *message)
@@ -222,10 +236,18 @@ static gboolean runner_bus_cb(GstBus *bus, GstMessage *msg, gpointer data)
 		gst_message_parse_state_changed(msg, &old_state, &new_state,
 		                                &pending);
 		(void)old_state;
-		(void)pending;
 		if ((GstObject *)r->pipeline == GST_MESSAGE_SRC(msg) &&
 		    new_state == GST_STATE_PLAYING)
 			me_log(ME_LOG_INFO, "base pipeline PLAYING");
+		if (r->live.phase == LIVE_PHASE_WAITING_NULL && r->live.branch &&
+		    (GstObject *)r->live.branch == GST_MESSAGE_SRC(msg) &&
+		    new_state == GST_STATE_NULL && pending == GST_STATE_VOID_PENDING) {
+			r->live.phase = LIVE_PHASE_BUS_DRAIN;
+			me_log(ME_LOG_DEBUG,
+			       "gst: live branch %s reached NULL; draining bus before destroy",
+			       r->live.session_id);
+			live_branch_schedule_destroy(r);
+		}
 		break;
 	}
 	default:
@@ -347,10 +369,12 @@ int gst_runner_start_live(GstRunner *r, const SessionParams *p, char *err,
 		           r->base_error[0] ? r->base_error : "starting");
 		return ME_ERR_MEDIA;
 	}
-	if (r->branch_active || r->live.branch) {
+	if (r->branch_active || r->live.branch ||
+	    (r->live.phase != LIVE_PHASE_IDLE &&
+	     r->live.phase != LIVE_PHASE_DESTROYED)) {
 		me_set_err(err, errsz,
-		           "live branch already active for session %s",
-		           r->live.session_id);
+		           "live branch unavailable for session %s (phase=%d)",
+		           r->live.session_id, r->live.phase);
 		return ME_ERR_MEDIA;
 	}
 	if (strcmp(p->codec, "h264") != 0) {
@@ -358,10 +382,13 @@ int gst_runner_start_live(GstRunner *r, const SessionParams *p, char *err,
 		           p->codec);
 		return ME_ERR_PARAM;
 	}
+	r->live.phase = LIVE_PHASE_STARTING;
 
 	r->live.branch = create_live_branch(p, r->cfg.stream_rotation, err, errsz);
-	if (!r->live.branch)
+	if (!r->live.branch) {
+		r->live.phase = LIVE_PHASE_IDLE;
 		return ME_ERR_MEDIA;
+	}
 	/* The branch must share the pipeline ancestor before pads can be
 	 * linked (this build rejects cross-bin pad links). gst_bin_new returns
 	 * a floating reference: gst_bin_add sinks it into the pipeline, so we
@@ -369,6 +396,7 @@ int gst_runner_start_live(GstRunner *r, const SessionParams *p, char *err,
 	if (!gst_bin_add(GST_BIN(r->pipeline), r->live.branch)) {
 		me_set_err(err, errsz, "add live branch to pipeline failed");
 		r->live.branch = NULL; /* a failed add sinks and frees the element */
+		r->live.phase = LIVE_PHASE_DESTROYED;
 		return ME_ERR_MEDIA;
 	}
 	gst_object_ref(r->live.branch);
@@ -415,6 +443,7 @@ int gst_runner_start_live(GstRunner *r, const SessionParams *p, char *err,
 	}
 
 	r->branch_active = true;
+	r->live.phase = LIVE_PHASE_ACTIVE;
 	if (r->analytics) {
 		if (r->analytics_stream_epoch == UINT64_MAX)
 			r->analytics_stream_epoch = 1;
@@ -451,6 +480,7 @@ fail_branch:
 		gst_object_unref(r->live.branch);
 		r->live.branch = NULL;
 	}
+	r->live.phase = LIVE_PHASE_DESTROYED;
 	return ME_ERR_MEDIA;
 }
 
@@ -464,11 +494,20 @@ static gboolean live_branch_destroy_idle(gpointer data)
 	GstRunner *r = data;
 
 	r->live.teardown_idle = 0;
-	if (!r->live.branch)
+	if (!r->live.branch) {
+		r->live.phase = LIVE_PHASE_DESTROYED;
 		return G_SOURCE_REMOVE;
+	}
+	if (r->live.phase != LIVE_PHASE_BUS_DRAIN) {
+		me_log(ME_LOG_ERROR,
+		       "gst: refusing live branch destroy in phase=%d session=%s",
+		       r->live.phase, r->live.session_id);
+		return G_SOURCE_REMOVE;
+	}
 	gst_bin_remove(GST_BIN(r->pipeline), r->live.branch);
 	gst_object_unref(r->live.branch);
 	r->live.branch = NULL;
+	r->live.phase = LIVE_PHASE_DESTROYED;
 	r->live.session_id[0] = '\0';
 	r->live.fps = 0;
 	r->live.bitrate = 0;
@@ -478,6 +517,8 @@ static gboolean live_branch_destroy_idle(gpointer data)
 
 static void live_branch_schedule_destroy(GstRunner *r)
 {
+	if (r->live.phase != LIVE_PHASE_BUS_DRAIN)
+		return;
 	if (r->live.teardown_idle)
 		return;
 	r->live.teardown_idle = g_idle_add(live_branch_destroy_idle, r);
@@ -488,9 +529,10 @@ static void live_branch_schedule_destroy(GstRunner *r)
  * for the whole multi-pad push, so once we hold it no tee src pad is being
  * used by the streaming thread. Bin destruction is deferred to an idle
  * callback so pending bus messages are drained first. */
-static void live_branch_teardown(GstRunner *r)
+static GstStateChangeReturn live_branch_teardown(GstRunner *r)
 {
 	GstPad *tee_sink;
+	GstStateChangeReturn state_ret;
 
 	tee_sink = gst_element_get_static_pad(r->tee, "sink");
 	if (tee_sink) {
@@ -510,20 +552,46 @@ static void live_branch_teardown(GstRunner *r)
 		gst_object_unref(tee_sink);
 	}
 
-	gst_element_set_state(r->live.branch, GST_STATE_NULL);
+	state_ret = gst_element_set_state(r->live.branch, GST_STATE_NULL);
 	r->branch_active = false;
-	live_branch_schedule_destroy(r);
+	return state_ret;
 }
 
 int gst_runner_stop_live(GstRunner *r, const char *session_id, char *err,
                          size_t errsz)
 {
-	if (!r->branch_active || strcmp(r->live.session_id, session_id) != 0) {
+	GstStateChangeReturn state_ret;
+
+	if ((r->live.phase == LIVE_PHASE_STOPPING ||
+	     r->live.phase == LIVE_PHASE_WAITING_NULL ||
+	     r->live.phase == LIVE_PHASE_BUS_DRAIN) &&
+	    strcmp(r->live.session_id, session_id) == 0)
+		return ME_ERR_OK;
+	if (!r->branch_active || r->live.phase != LIVE_PHASE_ACTIVE ||
+	    strcmp(r->live.session_id, session_id) != 0) {
 		me_set_err(err, errsz, "no live branch for session %s", session_id);
 		return ME_ERR_NOT_FOUND;
 	}
 
-	live_branch_teardown(r);
+	r->live.phase = LIVE_PHASE_STOPPING;
+	state_ret = live_branch_teardown(r);
+	if (state_ret == GST_STATE_CHANGE_FAILURE) {
+		r->live.phase = LIVE_PHASE_FAILED;
+		me_set_err(err, errsz, "live branch failed to reach NULL");
+		me_log(ME_LOG_ERROR,
+		       "gst: live branch %s NULL transition failed; retaining branch",
+		       session_id);
+		return ME_ERR_MEDIA;
+	}
+	if (state_ret == GST_STATE_CHANGE_ASYNC) {
+		r->live.phase = LIVE_PHASE_WAITING_NULL;
+		me_log(ME_LOG_DEBUG,
+		       "gst: live branch %s stop pending asynchronous NULL transition",
+		       session_id);
+	} else {
+		r->live.phase = LIVE_PHASE_BUS_DRAIN;
+		live_branch_schedule_destroy(r);
+	}
 	if (r->analytics) {
 		if (r->analytics_stream_epoch == UINT64_MAX)
 			r->analytics_stream_epoch = 1;
@@ -532,8 +600,8 @@ int gst_runner_stop_live(GstRunner *r, const char *session_id, char *err,
 		me_rockiva_runner_set_stream(r->analytics, r->analytics_channel_id,
 		                             r->analytics_stream_epoch);
 	}
-	me_log(ME_LOG_INFO, "live branch %s stopped, udpsink released",
-	       session_id);
+	me_log(ME_LOG_INFO, "live branch %s stop accepted (phase=%d)", session_id,
+	       r->live.phase);
 	return ME_ERR_OK;
 }
 

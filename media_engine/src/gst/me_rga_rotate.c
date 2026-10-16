@@ -358,12 +358,8 @@ static gboolean me_rga_rotate_propose_allocation(GstBaseTransform *trans,
 		/* Prefer dmabuf so kmssink gets a zero-copy framebuffer; fall back
 		 * to whatever the downstream/upstream chain suggested. */
 		if (gst_query_get_n_allocation_params(query) > 0) {
-			GstAllocator *parsed_allocator = NULL;
-
-			gst_query_parse_nth_allocation_param(query, 0, &parsed_allocator,
+			gst_query_parse_nth_allocation_param(query, 0, &allocator,
 			                                     &params);
-			if (parsed_allocator)
-				allocator = GST_ALLOCATOR(gst_object_ref(parsed_allocator));
 		}
 		if (allocator == NULL)
 			allocator = me_dma_heap_allocator_new();
@@ -424,8 +420,6 @@ static gboolean me_rga_rotate_decide_allocation(GstBaseTransform *trans,
 		                                    &max);
 	if (pool == NULL)
 		pool = gst_video_buffer_pool_new();
-	else
-		gst_object_ref(pool);
 
 	config = gst_buffer_pool_get_config(pool);
 	gst_query_parse_allocation(query, &outcaps, NULL);
@@ -436,13 +430,8 @@ static gboolean me_rga_rotate_decide_allocation(GstBaseTransform *trans,
 			size = GST_VIDEO_INFO_SIZE(&info);
 		gst_buffer_pool_config_set_params(config, outcaps, size, min, max);
 	}
-	if (gst_buffer_pool_config_get_allocator(config, &allocator, &params)) {
-		if (allocator)
-			gst_object_unref(allocator);
-		allocator = NULL;
-	}
-	if (!allocator)
-		allocator = me_dma_heap_allocator_new();
+	gst_buffer_pool_config_get_allocator(config, NULL, &params);
+	allocator = me_dma_heap_allocator_new();
 	if (allocator) {
 		params.align = 15;
 		gst_buffer_pool_config_set_allocator(config, allocator, &params);

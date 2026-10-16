@@ -201,6 +201,20 @@ gdb 脚本），均不进产品代码。已验证：
   冻结、后续会话无帧**（改用 tee sink pad 的 stream lock 在主线程安全拆链，
   分支 queue 加 `leaky=downstream` 防止慢网络堵死 tee）
 
+## GStreamer 资源回归（主机）
+
+安装 GStreamer core、video、allocators 开发库后运行：
+
+```sh
+make -C media_engine/tests gst-tests
+```
+
+`me_rga_allocation_test` 直接调用生产 `rgarotate` 的分配回调，循环验证
+allocator 借用引用、query 返回的拥有引用以及 pool/query 销毁顺序。
+测试使用仅供编译的 RGA 桩，任何实际 RGA 调用都会中止测试，不申请 DMA
+缓冲；`gst_runner_lifecycle_test` 覆盖异步 NULL 状态转换及重复停止。
+这些主机测试不能替代板端 WVP INVITE/ACK/RTP/BYE/再次点播回归。
+
 ## 实施状态
 
 - [x] 模块 1：`ipc_server`（协议解析、字段校验、错误码、事件广播、单进程 GLib 主循环）
