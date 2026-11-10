@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.py[cod]
+dataset/prepared/
+runs/
+models/*.pt
+models/*.onnx

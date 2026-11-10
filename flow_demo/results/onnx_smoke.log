@@ -1,0 +1,29 @@
+flow_demo ONNX 抽帧 smoke 结果
+时间: 2026-11-09
+
+模型:
+- 来源: /home/Tiger/Documents/code/web/wvp-ssv/models/yolov8n.onnx
+- SHA256: 52afbc5537bec307541318edb99e8e2d982b94fae97dcaf347d62ceeeb9f1892
+- 输入: float32 [1, 3, 640, 640] NCHW
+- 输出: float32 [1, 84, 8400] YOLOv8
+- ONNX metadata description: Ultralytics YOLOv8n model trained on coco.yaml
+- 类别数: 80
+
+试跑:
+- 输入: flow_demo/dataset/raw_videos/*.mp4
+- 抽帧: 每 2 秒 1 帧，共 38 帧
+- 后端: ONNX Runtime CPUExecutionProvider
+- 预处理: RGB、640x640 letterbox、/255
+- 结论: 推理链路可运行，但当前权重不是 helmet 模型。
+- 主要输出为 person，并出现 keyboard、laptop、cell phone、cake 等 COCO 类别。
+
+限制:
+- 本次结果不能作为安全帽检测结果。
+- 需要找到实际 helmet 训练权重并重新导出/核验 ONNX；替换模型后再重复本 smoke。
+
+补充核验:
+- SSV 当前默认配置为该 ONNX 配套 `config/model-labels/coco80.txt`，`target_class` 为 `person`。
+- SSV 另有 `config/model-labels/helmet.txt`（helmet、head 两类），但它与当前 80 类 ONNX 不匹配；SSV YOLO parser 会校验模型类别数与标签数。
+- 本机 `wvp-ai/backend/models/yolov8n.pt` 直接读取类别表同样为 COCO 80 类，不是 helmet 权重。
+- 搜索本机 Documents/code 下命名含 helmet/hardhat 的 `.pt`、`.onnx` 权重，没有找到候选文件。
+- 结论：目前尚未定位到可供本项目使用的 helmet 专用权重。需要提供真实 `.pt`/`.onnx` 权重路径，或先从视频抽帧标注再训练；不能把已有 COCO 模型输出解释为 helmet 检测。
