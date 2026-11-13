@@ -1,0 +1,20 @@
+{
+  "session_id": "horizontal-demo-example",
+  "video": "REPLACE_WITH_RECORDED_VIDEO_PATH",
+  "geometry_confirmed": false,
+  "zones": {
+    "inside": [[0.0, 0.0], [0.3, 0.0], [0.3, 1.0], [0.0, 1.0]],
+    "transition": [[0.3, 0.0], [0.6, 0.0], [0.6, 1.0], [0.3, 1.0]],
+    "outside": [[0.6, 0.0], [1.0, 0.0], [1.0, 1.0], [0.6, 1.0]]
+  },
+  "max_observation_gap_ms": 400,
+  "merge_window_ms": 1000,
+  "min_track_score": 0.1,
+  "tracker": {
+    "track_low_thresh": 0.1,
+    "track_high_thresh": 0.6,
+    "new_track_thresh": 0.7,
+    "match_thresh": 0.8,
+    "track_buffer": 30
+  }
+}

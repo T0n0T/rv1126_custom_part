@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.16)
+project(flow_demo_tracking LANGUAGES CXX)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+enable_testing()
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+add_library(flow_demo_botsort STATIC
+  ../third_party/botsort/botsort_kalman.cpp
+  ../third_party/botsort/botsort_matching.cpp
+  ../third_party/botsort/botsort_lapjv.cpp
+  ../third_party/botsort/botsort_tracker.cpp
+  ../third_party/botsort/botsort_gmc.cpp)
+target_include_directories(flow_demo_botsort PUBLIC ../third_party/botsort)
+target_compile_definitions(flow_demo_botsort PRIVATE SSV_HAS_OPENCV=0)
+target_compile_options(flow_demo_botsort PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
+add_executable(flow_demo_cli src/demo_main.cpp src/crossing_engine.cpp)
+target_link_libraries(flow_demo_cli PRIVATE flow_demo_botsort)
+target_include_directories(flow_demo_cli BEFORE PRIVATE ../third_party/nlohmann)
+target_include_directories(flow_demo_cli PRIVATE src ../third_party/botsort)
+target_compile_options(flow_demo_cli PRIVATE -Wall -Wextra -Werror)
+
+add_executable(flow_demo_tracker_tests tests/test_botsort_tracker.cpp)
+target_link_libraries(flow_demo_tracker_tests PRIVATE flow_demo_botsort)
+target_include_directories(flow_demo_tracker_tests PRIVATE ../third_party/botsort)
+target_compile_options(flow_demo_tracker_tests PRIVATE -Wall -Wextra -Werror)
+add_executable(flow_demo_crossing_tests tests/test_crossing_engine.cpp src/crossing_engine.cpp)
+target_link_libraries(flow_demo_crossing_tests PRIVATE flow_demo_botsort)
+target_include_directories(flow_demo_crossing_tests PRIVATE src ../third_party/botsort)
+target_compile_options(flow_demo_crossing_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME flow_demo_tracker_tests COMMAND flow_demo_tracker_tests)
+add_test(NAME flow_demo_crossing_tests COMMAND flow_demo_crossing_tests)
+add_library(flow_demo_live_events STATIC ../board/flow_events.cpp src/crossing_engine.cpp)
+target_link_libraries(flow_demo_live_events PUBLIC flow_demo_botsort)
+target_include_directories(flow_demo_live_events PRIVATE src ../third_party/nlohmann PUBLIC ../board)
+target_compile_options(flow_demo_live_events PRIVATE -Wall -Wextra -Werror)
+add_executable(flow_demo_live_tests tests/test_live_events.cpp)
+target_link_libraries(flow_demo_live_tests PRIVATE flow_demo_live_events)
+target_include_directories(flow_demo_live_tests PRIVATE ../third_party/nlohmann)
+target_compile_options(flow_demo_live_tests PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME flow_demo_live_tests COMMAND flow_demo_live_tests)
+add_test(NAME flow_demo_cli_integration
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_demo_cli.py $<TARGET_FILE:flow_demo_cli>)

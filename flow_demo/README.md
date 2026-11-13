@@ -1,36 +1,80 @@
 # flow_demo
 
-RV1126B 售卖柜安全帽出入检测 Demo。目标是从柜口过程视频中识别单类别安全帽，并逐次判定取出、放入或无法确认的动作。
+面向 RV1126B 售卖柜的安全帽出入检测 Demo：检测安全帽本体，通过 BoT-SORT 跟踪和柜内、柜口过渡区、柜外三区判定取出、放入或无法确认的过程。区域保存在独立 JSON profile 中，可按实际机位配置。
 
-## 当前状态
+## 当前能力与边界
 
-当前已完成项目初始化，并收到 11 段手机录制的柜口过程视频；尚无安全帽专用标注、训练权重或板端验证结果。视频已完成 PC 端完整解码检查，可进入机位审查和抽帧标注阶段。
+- 板载摄像头可在板端完成 INT8 检测、跟踪、区域事件记录及屏幕调试，显示框、ID、三区、取放计数和 AI 结果年龄。
+- 预览使用 DMA-BUF → RGA → KMS，约 30 FPS；检测仍有 CPU 预处理和 RKNN 输入复制，尚非全链路零拷贝。
+- 实时与文件输入共用检测和事件格式。文件联调目前由 PC 解码、分批发送 RGB，板端执行推理与跟踪；板端本机文件解码尚待验证。
+- 支持本项目 YOLO26 双输出 INT8 和单类别 YOLOv8 六头 INT8，运行时校验张量结构并读取量化参数。YOLO26l 检测约 7.6 FPS，轻量 YOLOv8n 在当前摄像头测试场景约 30 FPS；速度和检测效果须分别评估。
+- 默认区域是明确标记的 **DEBUG 示例**。实际板载机位仍需标定；真实柜口取放验收尚未通过，不能把运行成功、通用 PPE 指标或预览帧率当成动作准确率。
 
-本次实际检查确认，当前文件 `wvp-ssv/models/yolov8n.onnx` 的 metadata 是 COCO 80 类模型，不能判断安全帽；SSV 默认配置也为它使用 `coco80.txt` 和 `person` 类，仓库中的两类 `helmet/head` 标签与该模型不匹配。`yolov8n-preproc.onnx` 以及本机 `wvp-ai` 下的 `yolov8n.pt` 也都是 COCO 模型。已用该 ONNX 对视频抽帧完成 CPU smoke，仅作为运行链路基线。没有专门摆拍照片不是阻塞条件，可以先从本批视频抽取清晰帧并标注；后续再用专门摆拍补足款式、角度和背景覆盖。详细结果见 `results/onnx_smoke.log`。目前尚未定位到 helmet 专用权重。
+历次功能、修复、板端测试和已知问题记录在 [CHANGELOG.md](CHANGELOG.md)，详细证据见各专项文档。
 
-## 已确认的方案
+## 摄像头快速开始
 
-- 训练与模型转换在电脑端完成；板端独立执行推理、跟踪、穿越判定和事件记录。
-- GStreamer 负责视频解码与逐帧调度；文件回放先于实时摄像头。
-- 复制必要的 SSV 推理及跟踪源码到本项目独立维护；推理抽象可为 RKNN 量化张量作适配，不依赖 SSV 工作树。
-- 检测基线为单类别 `helmet`、YOLOv8n、640×640、通用预训练权重微调；优先验证 ONNX 到 RKNN INT8 转换。安全帽外观模型只能作为候选初始化或比较基线，需验证其对柜内散放安全帽的适用性。
-- 检测、BoT-SORT 跟踪、三区域穿越和事件输出保持分层；出入逻辑不塞进 tracker。
-- 文件回放使用阻塞回压；实时模式使用有界队列，可丢弃旧帧并按 PTS 间隔将无法连续判断的轨迹标为不确定。
-- 首版以简洁日志和 `events.jsonl` 呈现结论，不做完整 UI 或 WVP 集成。
+以下命令从 `flow_demo/` 执行。交叉编译依赖上层 RV1126B SDK，板端需提供匹配的 RKNN、AIQ、RGA 和 GStreamer 运行库。模型文件不随 Git 分发，先按下表准备所需本地文件；启动前正常停止占用摄像头和 DRM 的服务。
 
-## 文档与素材
+```sh
+make -C board
+board/run_rknn_camera_demo.sh start camera-debug-001
+board/run_rknn_camera_demo.sh status camera-debug-001
+board/run_rknn_camera_demo.sh stop camera-debug-001
+```
 
-- `docs/spec.md`：需求、事件语义、验收目标和非目标。
-- `docs/plan.md`：实施步骤、依赖、技术验证和验证门槛。
-- `dataset/README.md`：照片、视频、标注及数据集划分准备说明。
-- `training/README.md`：跨机器数据准备、YOLOv8n 训练和 ONNX 导出命令。
+每次使用未用过的运行名称。`stop` 会正常退出、释放设备并拉回结果。参数集中在 [board/camera.env](board/camera.env)，也可通过同名环境变量覆盖；默认目标为 `192.168.1.63:5555`、ADB server 端口 `5038`。此板当前使用 BGR 色序、相机旋转 180°、整屏旋转 270°，原生面板为 480×800。
 
-## 目标验证路径
+| 模型 | 本地路径 | 说明 |
+| --- | --- | --- |
+| YOLO26l INT8，默认 | `runs/rknn/comp-2-freeze10-int8-20261111/split/comp-2-freeze10-rv1126b-int8.rknn` | `helmet/head` 两类，概率与坐标独立量化 |
+| YOLOv8n INT8，轻量候选 | `runs/rknn/helmet-yolov8n-heads-int8-eval/helmet-yolov8n-rv1126b-int8.rknn` | 单类别 `helmet`，六头 DFL/NMS，柜口效果待比较 |
 
-1. 人工检测框序列验证跟踪与穿越判定。
-2. 机位审查、视频抽帧和 `helmet` 标注。
-3. PC 端视频回放和模型验证。
-4. RV1126B 板端文件回放。
-5. 接入实时摄像头并验证有界队列和观测间隔处理.
+停止旧运行后，可通过 `MODEL` 切换，也可在 `camera.env` 中持久设置模型的完整路径：
 
-以上为计划路径，不表示这些阶段已完成。
+```sh
+MODEL="$PWD/runs/rknn/helmet-yolov8n-heads-int8-eval/helmet-yolov8n-rv1126b-int8.rknn" \
+  board/run_rknn_camera_demo.sh start camera-yolov8-001
+```
+
+FP16 模型尚未接入实时后处理；`comp-2-freeze10-int8-20261111/full/` 是已知分数量化归零的失败版本。完整兼容表、标定、输出格式及 `media_engine` 服务切换方式见 [摄像头屏显说明](docs/board-camera-demo.md)。
+
+## 区域标定与事件
+
+板载摄像头用 [board/calibrate_camera_zones.py](board/calibrate_camera_zones.py) 在干净 `source.ppm` 截图上标定；手机视频用 [tracking/calibrate_zones.py](tracking/calibrate_zones.py) 跨多张采样帧复核区域。不同机位分别保存 profile；固定机位可复用，视角、裁剪或相机旋转改变后需重新确认。区域坐标不写死在检测程序中。
+
+仅 `helmet` 参与取放计数。事件使用实际检测帧的源 PTS；长遮挡、断检或无法连续关联的轨迹保留为不确定结果。DEBUG 区域不会产生正式确认计数。配置格式和使用方法见 [区域配置说明](tracking/config/README.md)。
+
+## 开发与验证
+
+PC 端跟踪与事件核心可独立构建测试：
+
+```sh
+cmake -S tracking -B tracking/build -DCMAKE_BUILD_TYPE=Debug
+cmake --build tracking/build -j4
+ctest --test-dir tracking/build --output-on-failure
+make -C board test-image
+```
+
+Python 工具测试使用安装了相应依赖的环境运行：
+
+```sh
+python -m pytest -q training/tests tracking/tests
+```
+
+训练及导出见 [training/README.md](training/README.md)，RKNN 工具与交叉编译见 [board/README.md](board/README.md)。当前验证重点是实际机位标定、遮挡下的检测与轨迹连续性，以及带逐次动作真值的独立评测。
+
+## 文档与版本管理
+
+| 文档 | 内容 |
+| --- | --- |
+| [CHANGELOG.md](CHANGELOG.md) | 按日期记录功能、修复、验证结果和限制 |
+| [docs/spec.md](docs/spec.md)、[docs/plan.md](docs/plan.md) | 需求、事件语义、实现边界与后续工作 |
+| [docs/board-camera-demo.md](docs/board-camera-demo.md) | 实时摄像头、模型切换、屏显、标定与服务管理 |
+| [docs/board-video-demo.md](docs/board-video-demo.md) | 视频分批回放、逐段结果及遮挡问题 |
+| [docs/comp-2-freeze10-rknn.md](docs/comp-2-freeze10-rknn.md) | YOLO26 转换、双输出契约及量化退化 |
+| [docs/board-rknn-smoke.md](docs/board-rknn-smoke.md) | RKNN runtime 与旧 YOLOv8 模型 smoke |
+| [tracking/README.md](tracking/README.md) | BoT-SORT、区域事件 CLI 与标定工具 |
+| [dataset/README.md](dataset/README.md) | 数据准备、标注和划分约定 |
+
+Git 管理源码、脚本、测试、示例配置、文档及第三方源码与许可证。训练环境、原始视频与数据集、模型权重、`runs/`、`results/`、编译输出和 `tracking/config/local/` 下的实际机位 profile 均留在本地并由 `.gitignore` 排除。克隆仓库后，需另行准备模型、素材和设备配置。

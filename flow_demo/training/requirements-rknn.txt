@@ -1,0 +1,13 @@
+# Install the CPU PyTorch 2.4.0 wheel separately before these dependencies.
+# Install the local RKNN Toolkit2 2.5.0 wheel for your Python ABI with --no-deps.
+numpy==1.26.4
+onnx==1.17.0
+onnxruntime==1.23.2
+protobuf==4.25.4
+opencv-python==4.11.0.86
+pillow==12.2.0
+scipy==1.15.3
+psutil==7.2.2
+ruamel.yaml==0.19.1
+tqdm==4.70.1
+fast-histogram==0.14

@@ -25,5 +25,8 @@ media_engine/tests/board/rockiva_probe/v4l2_rockiva_probe
 # Daemon build output
 gb28181_daemon/bin/
 
+# Intermediate ONNX exports generated while validating optimizer passes
+/check[0-3]_*.onnx
+
 # Vendored GStreamer checkout/build assets are maintained outside this baseline
 gstreamer/
